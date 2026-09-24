@@ -19,6 +19,9 @@ add_library(streamforge_core STATIC
     src/WinsockRuntime.cpp
     src/Socket.cpp
     src/FrameCodec.cpp
+    src/FrameAssembler.cpp
+    src/WakeupChannel.cpp
+    src/ThreadPool.cpp
     src/Connection.cpp
     src/MessageHandler.cpp
     src/TcpServer.cpp
@@ -55,3 +58,7 @@ target_link_libraries(streamforge_storage_tests PRIVATE streamforge_core)
 # Protocol Unit Tests executable
 add_executable(streamforge_protocol_tests tests/protocol_tests.cpp)
 target_link_libraries(streamforge_protocol_tests PRIVATE streamforge_core)
+
+# Network Unit Tests executable
+add_executable(streamforge_net_tests tests/net_tests.cpp)
+target_link_libraries(streamforge_net_tests PRIVATE streamforge_core)

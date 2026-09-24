@@ -52,6 +52,8 @@ public:
     SendResult send_all(const uint8_t* buffer, size_t bytes_to_send);
 
     bool get_peer_address(std::string& out_ip, uint16_t& out_port) const;
+    bool get_local_address(std::string& out_ip, uint16_t& out_port) const;
+    bool set_non_blocking(bool non_blocking = true);
 
     static Socket create_listener(const std::string& host, uint16_t port);
 

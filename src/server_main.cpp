@@ -38,6 +38,10 @@ int main(int argc, char* argv[]) {
     uint32_t segment_bytes = streamforge::DEFAULT_SEGMENT_MAX_BYTES;
     bool sync_on_append = true;
     std::string log_level_str = "INFO";
+    size_t workers = std::max(2u, std::thread::hardware_concurrency());
+    size_t max_connections = 1024;
+    uint32_t read_stall_timeout_sec = 30;
+    size_t max_output_buffer_bytes = 8 * 1024 * 1024; // 8 MiB
 
     for (int i = 1; i < argc; ++i) {
         std::string arg = argv[i];
@@ -54,6 +58,14 @@ int main(int argc, char* argv[]) {
             sync_on_append = (val == "true" || val == "1");
         } else if (arg == "--log-level" && i + 1 < argc) {
             log_level_str = argv[++i];
+        } else if (arg == "--workers" && i + 1 < argc) {
+            workers = static_cast<size_t>(std::stoul(argv[++i]));
+        } else if (arg == "--max-connections" && i + 1 < argc) {
+            max_connections = static_cast<size_t>(std::stoul(argv[++i]));
+        } else if (arg == "--read-stall-timeout-sec" && i + 1 < argc) {
+            read_stall_timeout_sec = static_cast<uint32_t>(std::stoul(argv[++i]));
+        } else if (arg == "--max-output-buffer-bytes" && i + 1 < argc) {
+            max_output_buffer_bytes = static_cast<size_t>(std::stoull(argv[++i]));
         } else if (arg.rfind("--", 0) != 0) {
             port = static_cast<uint16_t>(std::atoi(argv[i]));
         }
@@ -99,7 +111,15 @@ int main(int argc, char* argv[]) {
         }
 
         streamforge::MessageHandler message_handler(topic_mgr);
-        streamforge::TcpServer server(host, port, message_handler);
+        streamforge::ServerConfig server_cfg;
+        server_cfg.host = host;
+        server_cfg.port = port;
+        server_cfg.workers = workers;
+        server_cfg.max_connections = max_connections;
+        server_cfg.read_stall_timeout_sec = read_stall_timeout_sec;
+        server_cfg.max_output_buffer_bytes = max_output_buffer_bytes;
+
+        streamforge::TcpServer server(server_cfg, message_handler);
         g_server_instance = &server;
         server.start();
         server.wait_until_stopped();

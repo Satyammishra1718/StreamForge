@@ -3,21 +3,25 @@
 
 #include "streamforge/WinsockRuntime.hpp"
 #include "streamforge/Socket.hpp"
-#include "streamforge/Connection.hpp"
 #include "streamforge/MessageHandler.hpp"
+#include "streamforge/ServerConfig.hpp"
+#include "streamforge/ConnectionState.hpp"
+#include "streamforge/WakeupChannel.hpp"
+#include "streamforge/ThreadPool.hpp"
+#include "streamforge/TaskQueue.hpp"
 #include <atomic>
-#include <mutex>
-#include <thread>
 #include <vector>
+#include <unordered_map>
 #include <memory>
 #include <string>
+#include <cstdint>
 
 namespace streamforge {
 
-constexpr size_t MAX_CONCURRENT_CONNECTIONS = 256;
-
 class TcpServer {
 public:
+    TcpServer(ServerConfig config, MessageHandler handler);
+    // Backward-compatible constructor for M1-M3 scripts and tests
     TcpServer(std::string host, uint16_t port, MessageHandler handler);
     ~TcpServer();
 
@@ -28,29 +32,30 @@ public:
     void request_stop();
     void wait_until_stopped();
 
-private:
-    void accept_loop();
-    void reap_finished_connections();
+    size_t active_connections() const;
 
-    struct ClientSession {
-        std::thread thread;
-        std::shared_ptr<Connection> connection;
-        std::shared_ptr<Socket> socket;
-        std::shared_ptr<std::atomic<bool>> finished;
-    };
+private:
+    void event_loop();
+    void accept_new_connections();
+    void process_completions();
+    void check_read_stalls(std::chrono::steady_clock::time_point now);
+    void close_connection(uint64_t conn_id);
+    void queue_immediate_error_and_close(ConnectionState* conn, const Frame& err_frame);
 
     WinsockRuntime m_winsock;
-    std::string m_host;
-    uint16_t m_port;
+    ServerConfig m_config;
+    MessageHandler m_message_handler;
 
     Socket m_listen_socket;
+    WakeupChannel m_wakeup;
+    CompletionQueue m_comp_queue;
+    std::unique_ptr<ThreadPool> m_thread_pool;
+
     std::atomic<bool> m_shutdown_requested{false};
     std::atomic<bool> m_running{false};
 
-    MessageHandler m_message_handler;
-
-    std::mutex m_sessions_mutex;
-    std::vector<std::shared_ptr<ClientSession>> m_sessions;
+    uint64_t m_next_conn_id{1};
+    std::unordered_map<uint64_t, std::unique_ptr<ConnectionState>> m_connections;
 };
 
 } // namespace streamforge

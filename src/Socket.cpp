@@ -106,6 +106,26 @@ bool Socket::get_peer_address(std::string& out_ip, uint16_t& out_port) const {
     return true;
 }
 
+bool Socket::get_local_address(std::string& out_ip, uint16_t& out_port) const {
+    if (m_sock == INVALID_SOCKET) return false;
+    sockaddr_in addr;
+    int addr_len = sizeof(addr);
+    if (getsockname(m_sock, reinterpret_cast<sockaddr*>(&addr), &addr_len) != 0) {
+        return false;
+    }
+    char ip_str[INET_ADDRSTRLEN] = {0};
+    inet_ntop(AF_INET, &(addr.sin_addr), ip_str, INET_ADDRSTRLEN);
+    out_ip = ip_str;
+    out_port = ntohs(addr.sin_port);
+    return true;
+}
+
+bool Socket::set_non_blocking(bool non_blocking) {
+    if (m_sock == INVALID_SOCKET) return false;
+    u_long mode = non_blocking ? 1 : 0;
+    return ioctlsocket(m_sock, FIONBIO, &mode) == 0;
+}
+
 Socket Socket::create_listener(const std::string& host, uint16_t port) {
     SOCKET s = ::socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
     if (s == INVALID_SOCKET) {

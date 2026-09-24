@@ -144,6 +144,26 @@ int main(int argc, char* argv[]) {
 
     try {
         WinsockRuntime runtime;
+
+        if (command == "hold-connections") {
+            size_t count = args.empty() ? 10 : static_cast<size_t>(std::stoul(args[0]));
+            uint32_t seconds = args.size() > 1 ? static_cast<uint32_t>(std::stoul(args[1])) : 5;
+            std::vector<Socket> sockets;
+            sockets.reserve(count);
+            size_t connected = 0;
+            for (size_t i = 0; i < count; ++i) {
+                Socket s;
+                if (connect_socket(s, host, port)) {
+                    sockets.push_back(std::move(s));
+                    connected++;
+                }
+            }
+            std::cout << "Connected " << connected << " of " << count << " sockets, holding for " << seconds << " seconds...\n";
+            std::this_thread::sleep_for(std::chrono::seconds(seconds));
+            std::cout << "Released " << connected << " sockets.\n";
+            return 0;
+        }
+
         Socket sock;
         if (!connect_socket(sock, host, port)) {
             return 1;
@@ -151,7 +171,90 @@ int main(int argc, char* argv[]) {
 
         uint32_t req_id = 1000;
 
-        if (command == "ping") {
+        if (command == "stall-frame") {
+            uint8_t partial[2] = { 0x00, 0x00 };
+            if (sock.send_all(partial, 2) != SendResult::Success) {
+                std::cerr << "Failed to send stalled 2 bytes\n";
+                return 1;
+            }
+            std::cout << "Sent 2-byte stalled frame header, waiting for server timeout...\n";
+            uint8_t dummy[1];
+            RecvResult res = sock.recv_exact(dummy, 1);
+            if (res == RecvResult::Disconnected || res == RecvResult::Error) {
+                std::cout << "Server closed connection as expected (stall timeout triggered)\n";
+                return 0;
+            }
+            return 0;
+
+        } else if (command == "slow-reader") {
+            if (args.size() < 2) {
+                std::cerr << "Usage: streamforge_cli slow-reader <topic> <partition>\n";
+                return 1;
+            }
+            std::string topic = args[0];
+            uint16_t partition = static_cast<uint16_t>(std::stoul(args[1]));
+            std::cout << "Starting slow-reader on " << topic << " P" << partition << ", sending rapid FETCHes without reading responses...\n";
+            for (int i = 0; i < 2000; ++i) {
+                FetchRequest fetch_req;
+                fetch_req.topic = topic;
+                fetch_req.partition = partition;
+                fetch_req.start_offset = 0;
+                fetch_req.max_bytes = 1048500;
+                fetch_req.max_messages = 1000;
+
+                BodyWriter w;
+                fetch_req.encode(w);
+                Frame f{ HEADER_SIZE + static_cast<uint32_t>(w.buffer().size()), MessageType::FETCH, req_id++, w.take_buffer() };
+                std::vector<uint8_t> encoded = FrameCodec::encode(f);
+                if (sock.send_all(encoded.data(), encoded.size()) != SendResult::Success) {
+                    std::cout << "Connection closed by server after " << i << " FETCH requests (slow consumer limit enforced)\n";
+                    return 0;
+                }
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(500));
+            uint8_t dummy[1];
+            RecvResult res = sock.recv_exact(dummy, 1);
+            if (res == RecvResult::Disconnected || res == RecvResult::Error) {
+                std::cout << "Connection closed by server (slow consumer limit enforced)\n";
+                return 0;
+            }
+            return 0;
+
+        } else if (command == "pipeline") {
+            size_t n = args.empty() ? 100 : static_cast<size_t>(std::stoul(args[0]));
+            std::cout << "Pipelining " << n << " PING requests back-to-back...\n";
+            std::vector<uint8_t> all_bytes;
+            for (size_t i = 1; i <= n; ++i) {
+                Frame req;
+                req.type = MessageType::PING;
+                req.request_id = static_cast<uint32_t>(i);
+                req.length = HEADER_SIZE;
+                std::vector<uint8_t> enc = FrameCodec::encode(req);
+                all_bytes.insert(all_bytes.end(), enc.begin(), enc.end());
+            }
+            if (sock.send_all(all_bytes.data(), all_bytes.size()) != SendResult::Success) {
+                std::cerr << "Failed to send pipelined batch\n";
+                return 1;
+            }
+            for (size_t i = 1; i <= n; ++i) {
+                Frame resp;
+                if (!read_response_frame(sock, resp)) {
+                    std::cerr << "Failed to read response " << i << " of " << n << "\n";
+                    return 1;
+                }
+                if (resp.type != MessageType::PONG) {
+                    std::cerr << "Expected PONG (0x81), got 0x" << std::hex << static_cast<int>(resp.type) << "\n";
+                    return 1;
+                }
+                if (resp.request_id != static_cast<uint32_t>(i)) {
+                    std::cerr << "Request ID mismatch: expected " << i << ", got " << resp.request_id << "\n";
+                    return 1;
+                }
+            }
+            std::cout << "SUCCESS: All " << n << " pipelined responses received in strict sequential order with matching request_ids!\n";
+            return 0;
+
+        } else if (command == "ping") {
             Frame req;
             req.type = MessageType::PING;
             req.request_id = req_id++;

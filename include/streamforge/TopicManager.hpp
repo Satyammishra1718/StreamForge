@@ -7,6 +7,7 @@
 #include <string>
 #include <unordered_map>
 #include <memory>
+#include <shared_mutex>
 #include <mutex>
 #include <vector>
 #include <filesystem>
@@ -14,7 +15,7 @@
 namespace streamforge {
 
 // Lock Order Hierarchy:
-// 1. TopicManager::m_mutex (guards topic registry map)
+// 1. TopicManager::m_mutex (shared_mutex: shared lock for lookups/list, exclusive lock for create/recover)
 // 2. Topic::m_mutex (guards partition array access)
 // 3. Partition::m_mutex (guards active segment rolls, appends, positional reads, and flushing)
 
@@ -41,7 +42,7 @@ private:
     Status load_topic_metadata(const std::filesystem::path& topic_dir, uint32_t& out_partitions);
 
     StorageConfig m_config;
-    mutable std::mutex m_mutex;
+    mutable std::shared_mutex m_mutex;
     std::unordered_map<std::string, std::shared_ptr<Topic>> m_topics;
 };
 
