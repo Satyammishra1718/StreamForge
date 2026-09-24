@@ -9,3 +9,4 @@ build/
 .idea/
 temp_*/
 *.log
+data/

@@ -290,3 +290,246 @@ Here is the exact lifecycle of a `PRODUCE` request through every layer of the ne
 - **Partial Space in OS Buffer**: `WSAPoll` reporting `POLLOUT` only guarantees that the socket's kernel output buffer has *some* space (even as little as 1 byte).
 - **Preventing I/O Stalls**: If the server tries to send a 512 KB `FETCH` response on a blocking socket when only 64 KB of kernel buffer space is available, the thread will block until the client acknowledges packets. Because the I/O thread services all client connections, blocking on a slow receiver would freeze every other connection on the broker.
 - **Non-blocking Strategy**: A non-blocking `send()` writes whatever space is available immediately and returns. If bytes remain, StreamForge buffers them in `out_buffer` and registers `POLLOUT` with `WSAPoll`, allowing the I/O thread to continue servicing other clients while waiting for buffer space to free up.
+
+---
+
+## Milestone 5: Consumer Groups and Offset Commits
+
+### 1. Request Lifecycle Walkthroughs
+
+#### A. JoinGroup & Rebalance Flow
+1. **Client Registration**:
+   - A consumer client issues a `JOIN_GROUP` (`0x20`) frame containing `group_id`, `member_id` (empty string on first join to request generation of a UUID-like ID, or existing ID on rejoin), `protocol_type` (`"consumer"`), `session_timeout_ms`, and subscribed `topics`.
+2. **Coordinator Lock & Member Upsert**:
+   - Worker thread acquires `m_groups_mutex` (shared) and target `Group::m_mutex` (exclusive).
+   - If `member_id` is empty, coordinator generates a unique ID `group_id-uuid`.
+   - If the group is new, the first joining member becomes the leader.
+   - If membership or subscriptions change, group transitions to `PREPARING_REBALANCE` and bumps `generation_id` ($G \leftarrow G + 1$).
+3. **Partition Assignment Execution**:
+   - Coordinator invokes the assigned strategy (`RangeAssignor` or `RoundRobinAssignor`) passing all active members and topic partition counts.
+   - Partitions are deterministically mapped to members.
+   - Group state transitions to `STABLE`.
+4. **Response Transmission**:
+   - Coordinator builds `JOIN_GROUP_OK` (`0xA0`) containing `generation_id`, assigned `member_id`, leader status flag, and the list of partitions assigned to this member.
+   - Transmitted back to the client via `CompletionQueue` and the I/O loop.
+
+#### B. Offset Commit & Fetch Flow
+1. **Offset Commit**:
+   - Consumer finishes processing a batch of records up to offset $K$ for partition $P$.
+   - Sends `COMMIT_OFFSET` (`0x23`) with `group_id`, `member_id`, `generation_id`, `topic`, `partition`, and `offset = K + 1`.
+   - Worker validates:
+     - Group exists and matches `generation_id` (fencing zombie consumers).
+     - Member exists and currently owns partition $P$.
+   - Worker appends a binary commit record `[group_id, topic, partition, offset, timestamp]` to internal topic `__consumer_offsets` partition 0.
+   - Worker updates in-memory cache in `OffsetStore`.
+   - Returns `COMMIT_OFFSET_OK` (`0xA3`).
+2. **Offset Fetch**:
+   - Consumer on startup (or after rebalance) sends `FETCH_OFFSET` (`0x24`) with `group_id` and list of `(topic, partition)` pairs.
+   - Coordinator checks `OffsetStore` in-memory cache.
+   - Returns `FETCH_OFFSET_OK` (`0xA4`) with committed offsets. If no offset was ever committed for a partition, returns `-1` (indicating consumer should start from earliest/latest offset according to policy).
+
+#### C. Member Heartbeat & Reaper Flow
+1. **Heartbeat Transmission**:
+   - Client runs a lightweight background thread sending `HEARTBEAT` (`0x21`) frames every `session_timeout_ms / 3` (e.g., every 1000ms for a 3000ms timeout).
+   - Server worker validates `generation_id` and refreshes `member.last_heartbeat = steady_clock::now()`.
+   - Returns `HEARTBEAT_OK` (`0xA1`). If group has rebalanced in the interim, returns `REBALANCE_IN_PROGRESS` (`0x0E`) to signal the client to rejoin.
+2. **Reaper Background Scan**:
+   - Dedicated `TcpServer` background reaper thread wakes every 1 second.
+   - Calls `GroupCoordinator::expire_members(now)`.
+   - Iterates groups under `m_groups_mutex` (shared) and locks each `Group::m_mutex`.
+   - Any member whose `now - last_heartbeat > session_timeout` is transitioned to `DEAD` and removed from active membership.
+   - If active members remain, coordinator immediately triggers partition reassignment and bumps `generation_id`.
+   - If all members die, group transitions to `EMPTY`.
+
+#### D. Group Lag Inspection Flow
+1. **CLI Command**: Operator runs `streamforge-cli describe-group --group <group_id>`.
+2. **Group Metadata Retrieval**:
+   - Sends `DESCRIBE_GROUP` (`0x25`).
+   - Server returns group state, protocol type, leader ID, generation ID, active member IDs, and their assigned partitions.
+3. **Partition Watermark & Committed Offset Collation**:
+   - CLI issues `FETCH_OFFSET` (`0x24`) to read committed offset $C$ for each partition.
+   - CLI issues `FETCH` (`0x12`) or inspects topic partition metadata to read the current log end offset (High Watermark $H$).
+4. **Lag Calculation**:
+   - $\text{Lag} = H - C$ (if $C \ge 0$, else $\text{Lag} = H$).
+   - Printed in tabular format showing Group, Topic, Partition, Committed Offset, High Watermark, Lag, and Assigned Member ID.
+
+---
+
+### 2. Code Walkthroughs
+
+#### A. Assignor (`RangeAssignor` & `RoundRobinAssignor`)
+- Located in `include/streamforge/Assignor.hpp` and `src/Assignor.cpp`.
+- `RangeAssignor::assign()`:
+  - For each topic, partitions $0 \dots P-1$ are sorted numerically.
+  - Active member IDs are sorted lexicographically to guarantee deterministic identical assignments.
+  - Divides partitions: `base = num_partitions / num_members`, `rem = num_partitions % num_members`.
+  - The first `rem` members receive `base + 1` partitions; the remaining receive `base` partitions.
+  - Guarantees contiguous partition ranges per consumer.
+- `RoundRobinAssignor::assign()`:
+  - Sorts all `(topic, partition)` pairs across all topics.
+  - Alternates assigning each pair to members in round-robin sequence: `member_idx = i % num_members`.
+  - Guarantees maximally even distribution regardless of topic partition counts.
+
+#### B. GroupCoordinator
+- Located in `include/streamforge/GroupCoordinator.hpp` and `src/GroupCoordinator.cpp`.
+- Implements group state management: `EMPTY`, `PREPARING_REBALANCE`, `STABLE`, `DEAD`.
+- Guards global registry with `std::shared_mutex m_groups_mutex`.
+- Each `Group` maintains its own `std::mutex m_mutex`:
+  - `join_group()`: Validates member, updates subscription, bumps generation on member join/leave, triggers partition assignor, returns new assignment.
+  - `heartbeat()`: Validates member existence and matching `generation_id`. Updates `last_heartbeat`. Returns error code 14 (`REBALANCE_IN_PROGRESS`) if generation changed.
+  - `leave_group()`: Removes member, bumps generation, immediately rebalances remaining members.
+  - `expire_members()`: Evaluates `steady_clock::now() - last_heartbeat > session_timeout`. Evicts expired members, increments generation, triggers rebalance.
+
+#### C. OffsetStore
+- Located in `include/streamforge/OffsetStore.hpp` and `src/OffsetStore.cpp`.
+- Two-tier storage architecture:
+  1. **In-Memory Cache**: `std::unordered_map<std::string, int64_t>` mapping `"group:topic:partition"` to committed offset. Lookups are $O(1)$ under `m_mutex`.
+  2. **Durable Partition Storage**: Internal topic `"__consumer_offsets"`, Partition 0.
+     - Record format: Key = `group_id:topic:partition`, Value = `[8-byte offset][8-byte timestamp]`.
+     - Appends are durable and written to disk through standard `Partition::append_batch()`.
+- `OffsetStore::recover()`:
+  - Invoked during broker startup. Reads all records from `__consumer_offsets` partition 0 from offset 0 to end of log.
+  - Replays every valid commit record into the in-memory hash map, restoring the latest committed offset for every group and partition before accepting client traffic.
+
+#### D. `consume-group` CLI Client Loop
+- Located in `src/cli_main.cpp`.
+- Encapsulates production-grade consumer logic in native C++17:
+  1. Issues `JOIN_GROUP` with desired group ID and topic. Obtains assigned partition IDs and `generation_id`.
+  2. Spawns an independent background `std::thread` executing `heartbeat_worker_fn`:
+     - Sleeps on `std::condition_variable` in `session_timeout / 3` intervals.
+     - Sends `HEARTBEAT` frame. If response returns `REBALANCE_IN_PROGRESS`, flags rebalance needed and wakes main thread.
+  3. Main consumer loop:
+     - Fetches committed offsets via `FETCH_OFFSET`.
+     - Polls `FETCH` requests across assigned partitions.
+     - Processes received records.
+     - Commits offsets via `COMMIT_OFFSET` after batch processing.
+     - If rebalance flag is set or commit fails with `REBALANCE_IN_PROGRESS` or `ILLEGAL_GENERATION`, consumer cancels current poll, rejoins group, receives new partition assignments, and resumes consumption.
+  4. On process termination (`Ctrl+C`):
+     - Stops heartbeat thread and joins it.
+     - Sends `LEAVE_GROUP` frame so broker immediately rebalances remaining consumers without waiting for session timeout.
+
+---
+
+### 3. Deep-Dive Interview Questions & Answers
+
+#### Q1: Why does `GroupCoordinator` use two levels of locking (`m_groups_mutex` + per-group `m_mutex`)?
+- **Two-Level Locking Strategy**:
+  - `m_groups_mutex` (`std::shared_mutex`) guards the hash map mapping `group_id -> std::shared_ptr<Group>`.
+  - `Group::m_mutex` (`std::mutex`) guards the internal state of a single group (member list, generation ID, partition assignments).
+- **Contention Elimination**:
+  - In a broker managing hundreds of distinct consumer groups (e.g. `order-processor`, `analytics-pipeline`, `notification-service`), acquiring a global exclusive lock on every heartbeat or commit would serialize all groups across the broker, creating an extreme scalability bottleneck.
+  - With two levels of locking, heartbeats, offset commits, and joins for different groups acquire `m_groups_mutex` in **shared (read) mode**, allowing hundreds of worker threads to access different groups simultaneously.
+  - Only lookups/insertions of new groups take an exclusive lock on `m_groups_mutex`.
+  - Mutex acquisition is strictly hierarchical: `m_groups_mutex` is acquired *before* `Group::m_mutex`, mathematically preventing deadlocks.
+
+#### Q2: How does the RangeAssignor handle uneven partition counts?
+- **The Allocation Math**:
+  - Suppose topic `clicks` has 7 partitions ($0 \dots 6$) and consumer group `analytics` has 3 members ($C_0, C_1, C_2$).
+  - `base = 7 / 3 = 2` partitions per member.
+  - `rem = 7 % 3 = 1` extra partition.
+  - The assignor distributes the extra remainder partitions one-by-one to the first `rem` members:
+    - $C_0$ receives `base + 1 = 3` partitions: `[0, 1, 2]`.
+    - $C_1$ receives `base = 2` partitions: `[3, 4]`.
+    - $C_2$ receives `base = 2` partitions: `[5, 6]`.
+- **Deterministic Invariant**:
+  - Because member IDs are sorted lexicographically before assignment, all broker nodes and group members calculate the exact same deterministic partition ownership without race conditions.
+
+#### Q3: What is a "zombie consumer" and how does StreamForge fence it?
+- **What is a Zombie Consumer?**:
+  - A consumer thread that experiences a temporary stop-the-world garbage collection pause, thread freeze, or network partition long enough for its session timeout to expire.
+  - The coordinator detects the timeout, marks the member `DEAD`, bumps `generation_id` from $G$ to $G+1$, and reassigns its partitions to another active consumer.
+  - If the frozen consumer abruptly unfreezes, it is unaware that it has been evicted and attempts to commit offsets for records it processed before freezing.
+- **Generation-Based Fencing**:
+  - Every member is issued the current `generation_id` upon joining.
+  - Every `COMMIT_OFFSET` request includes `generation_id`.
+  - The coordinator validates `request.generation_id == group.generation_id`.
+  - When the zombie consumer sends a commit with generation $G$, the coordinator rejects it with error code 15 (`ILLEGAL_GENERATION`). The zombie is fenced from corrupting committed offsets.
+
+#### Q4: Why is `__consumer_offsets` stored as a regular topic rather than a separate database?
+- **Unified Architectural Simplicity**:
+  - By modeling committed offsets as messages in an internal topic `"__consumer_offsets"`, StreamForge reuses the exact same robust storage subsystem: append-only segments, sparse indexing, crash recovery, and CRC32 verification.
+  - No auxiliary database engine (SQLite, RocksDB) or external dependencies are required.
+- **Unified Replication & Durability**:
+  - In distributed setups, offset commits automatically inherit cluster replication, log compaction, disk flush policies (`sync_on_append`), and crash-consistency guarantees identical to user topics.
+
+#### Q5: What happens when a consumer crashes mid-batch without committing?
+- **At-Least-Once Delivery**:
+  - Consumer reads records at offsets 100–149.
+  - Consumer processes records 100–120 and then crashes (e.g. power loss or process kill) before issuing `COMMIT_OFFSET(150)`.
+  - The coordinator background reaper detects the heartbeat timeout, evicts the crashed consumer, bumps generation, and reassigns the partition to a surviving consumer.
+  - The new consumer queries `FETCH_OFFSET`, which returns offset 100 (the last successfully committed offset).
+  - The new consumer resumes reading from offset 100.
+  - *Result*: Records 100–120 are processed again. Duplicate processing is possible, but **zero data loss** occurs (At-Least-Once semantics).
+
+#### Q6: Why does `GroupCoordinator::expire_members()` run on a background reaper thread instead of the I/O event loop?
+- **Single-Threaded I/O Event Loop Invariant**:
+  - The `WSAPoll` I/O thread is the single owner of network sockets, responsible for accepting connections, non-blocking reads, and draining write buffers across thousands of clients.
+  - If member expiration ran on the I/O thread, iterating hundreds of consumer groups, checking timestamps, executing rebalances, and bumping generations would introduce variable latency spikes into the event loop, causing network packet stalls.
+- **Reaper Thread Independence**:
+  - The reaper thread runs as a dedicated background thread waking on a condition variable every 1 second.
+  - It acquires coordinator locks without interfering with socket I/O.
+  - On shutdown, `m_reaper_cv.notify_all()` ensures instant thread joining without delay.
+
+#### Q7: How does StreamForge prevent reserved topics (`__consumer_offsets`) from being corrupted by clients?
+- **System Topic Reservation**:
+  - Any topic name beginning with double underscores (`"__"`) is reserved for internal broker subsystems.
+- **Protocol Enforcement**:
+  - `MessageHandler::handle_produce()` and `handle_create_topic()` inspect incoming topic names:
+    ```cpp
+    if (topic_name.rfind("__", 0) == 0) {
+        return make_error_frame(frame.request_id, 6 /* TOPIC_NOT_FOUND or PERMISSION_DENIED */,
+                                "Direct access to internal topic is forbidden");
+    }
+    ```
+  - External TCP clients sending `PRODUCE` or `CREATE_TOPIC` requests targeting `"__consumer_offsets"` receive an immediate error response.
+  - Only internal server components (`OffsetStore`) have direct handle access to the internal partition.
+
+#### Q8: Explain the single-phase JoinGroup protocol in StreamForge vs Kafka's two-phase JoinGroup/SyncGroup protocol.
+- **Kafka's Two-Phase Protocol**:
+  - Phase 1 (`JoinGroup`): Clients register subscriptions. Kafka broker elects one client as the *Group Leader* and returns member metadata to the leader.
+  - Phase 2 (`SyncGroup`): The leader runs the assignor algorithm locally on the client and sends assignments back to the broker in `SyncGroup`. The broker distributes assignments to followers.
+  - *Trade-off*: Highly flexible (custom client partitioners without broker recompilation), but requires two sequential network roundtrips for every rebalance, increasing rebalance latency.
+- **StreamForge's Single-Phase Protocol**:
+  - Single Phase (`JOIN_GROUP`): Clients send subscribed topics and timeout.
+  - The broker coordinator maintains assignor strategies (`range`, `round-robin`) directly on the server.
+  - When rebalance is triggered, the coordinator computes partition assignments immediately on the broker and returns assignments directly in the `JOIN_GROUP_OK` frame in a **single network roundtrip**.
+  - *Benefit*: Dramatically faster rebalances, simpler client implementations, and zero rebalance state stalls.
+
+#### Q9: How does `OffsetStore::recover()` detect torn or corrupt offset records on startup?
+- **Log Recovery Integration**:
+  - When the broker boots, `TopicManager::open_and_recover_all()` iterates all topics, including `"__consumer_offsets"`.
+  - For each segment in Partition 0, `LogSegment::recover_and_rebuild_index()` scans all records from byte 0 to the physical end of file.
+  - For every record:
+    1. Validates that the record header length does not exceed file size.
+    2. Recalculates IEEE 802.3 CRC32 checksum across `[offset ... payload]`.
+    3. If a CRC mismatch or partial write is detected (torn tail from sudden power outage), the file is truncated using Win32 `SetEndOfFile()` to the last valid record boundary.
+  - `OffsetStore::recover()` then sequentially reads valid records from offset 0, parsing keys `group:topic:partition` and values `[offset][timestamp]`, and populates the clean in-memory cache.
+
+#### Q10: Why must `COMMIT_OFFSET` validate the partition assignment in addition to the generation?
+- **Preventing Stale Partition Overwrites**:
+  - Checking `generation_id` verifies that the group has not rebalanced globally since the member checked in.
+  - However, in dynamic consumer groups where members subscribe to multiple topics or partition assignments change, a consumer might have uncommitted buffers for partition $P$ from a prior epoch.
+  - Verifying `member.assigned_partitions.count(partition) > 0` ensures that a consumer can **never** commit an offset for a partition it does not actively own in the current generation, preventing partition offset corruption across peers.
+
+#### Q11: How does `consume-group` handle broker restart transparently?
+- **Automatic Reconnection & Rebalance Handshake**:
+  - If the broker restarts, the client socket disconnects (`recv()` returns 0 or `SOCKET_ERROR`).
+  - `consume-group` CLI detects the broken connection and initiates a reconnect backoff loop (retrying every 1 second).
+  - Once the broker socket accepts the new connection, the client:
+    1. Sends a new `JOIN_GROUP` frame with its member ID.
+    2. Receives a new valid `generation_id` and assigned partitions.
+    3. Re-spawns the background heartbeat thread.
+    4. Fetches the latest committed offsets via `FETCH_OFFSET` (restored by broker's `OffsetStore::recover()`).
+    5. Seamlessly resumes consumption without skipping or losing messages.
+
+#### Q12: Explain how thread count and handles remain stable across hundreds of dynamic join/leave cycles.
+- **Resource Management & RAII**:
+  - **Thread Allocation**:
+    - The broker utilizes a fixed-size worker thread pool (e.g. 4 threads) and 1 background reaper thread.
+    - Joining or leaving consumer groups **never** creates or destroys OS threads on the server. All coordinator tasks execute on existing worker pool threads.
+    - Client CLI processes spawn exactly one heartbeat thread per consumer, which is cleanly joined using RAII synchronization on shutdown.
+  - **Handle Management**:
+    - TCP connections are recycled through the single-owner event loop. Sockets are closed using Win32 `closesocket()` upon disconnect.
+    - Storage file handles (`.log`, `.index`) belong to persistent partition objects and are not reopened or duplicated during group operations.
+    - Memory for departed group members is erased from `m_members` hash maps, preventing memory leaks across thousands of rebalances.
+

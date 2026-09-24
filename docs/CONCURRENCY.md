@@ -60,6 +60,10 @@ Every lock in StreamForge is documented below with the resource it guards, its t
 | `TopicManager::m_mutex` | `std::shared_mutex` | `m_topics` hash map registry | Worker threads (via MessageHandler) |
 | `Topic::m_mutex` | `std::mutex` | `m_partitions` vector and topic metadata | Worker threads (via MessageHandler) |
 | `Partition::m_mutex` | `std::mutex` | Active segment, `m_segments`, index, offsets | Worker threads (via MessageHandler) |
+| `GroupCoordinator::m_groups_mutex` | `std::shared_mutex` | `m_groups` registry map | Worker threads, background reaper thread |
+| `Group::m_mutex` | `std::mutex` | Member list, assignments, generation, state machine | Worker threads, background reaper thread |
+| `OffsetStore::m_mutex` | `std::mutex` | In-memory cached committed offsets map | Worker threads (via MessageHandler) |
+| `TcpServer::m_reaper_mutex` | `std::mutex` | Synchronizes reaper sleep and shutdown CV | Server I/O thread, reaper thread |
 | `TaskQueue::m_mutex` | `std::mutex` | Worker request task FIFO queue | I/O thread (push), Worker threads (pop) |
 | `CompletionQueue::m_mutex` | `std::mutex` | Worker response completion FIFO queue | Worker threads (push), I/O thread (pop_all) |
 | `Logger::m_mutex` | `std::mutex` | Standard output console writing | I/O thread, Worker threads, CLI |
@@ -94,8 +98,9 @@ During our concurrency review, concurrent shared reading alongside exclusive app
 
 ## 3. Strict Lock Acquisition Hierarchy (Deadlock Prevention)
 
-To mathematically prevent deadlocks (violating Coffman's circular wait condition), locks must strictly be acquired in descending rank order:
+To mathematically prevent deadlocks (violating Coffman's circular wait condition), locks must strictly be acquired in descending rank order within their domain:
 
+### Domain A: Topic & Storage Hierarchy
 ```
 [Level 1: TopicManager::m_mutex] (shared or unique)
            │
@@ -105,10 +110,28 @@ To mathematically prevent deadlocks (violating Coffman's circular wait condition
            ▼
 [Level 3: Partition::m_mutex] (plain mutex)
 ```
-
 - A thread holding `Partition::m_mutex` may NEVER attempt to acquire `Topic::m_mutex` or `TopicManager::m_mutex`.
 - A thread holding `Topic::m_mutex` may NEVER attempt to acquire `TopicManager::m_mutex`.
-- Queue locks (`TaskQueue::m_mutex` and `CompletionQueue::m_mutex`) and `Logger::m_mutex` are leaf locks with microsecond durations; they are never held while acquiring any storage or topic locks.
+
+### Domain B: Consumer Group Coordinator Hierarchy
+```
+[Level 1: GroupCoordinator::m_groups_mutex] (shared or unique)
+           │
+           ▼
+[Level 2: Group::m_mutex] (plain mutex)
+           │
+           ▼
+[Level 3: OffsetStore::m_mutex] (plain mutex)
+```
+- A thread holding `Group::m_mutex` may NEVER attempt to acquire `GroupCoordinator::m_groups_mutex`.
+- Operations on different consumer groups acquire only the target `Group::m_mutex` under a shared lock of `m_groups_mutex`, enabling concurrent operations across distinct groups.
+- `OffsetStore::m_mutex` protects the in-memory committed offset cache. Committing an offset to the underlying `__consumer_offsets` log partition is performed *without* holding `Group::m_mutex` to prevent cross-domain lock inversion.
+
+### Cross-Domain Isolation Rule
+- Storage locks and Coordinator locks are completely orthogonal.
+- Worker threads executing standard produce/fetch operations acquire only Domain A locks.
+- Worker threads executing join, heartbeat, leave, or group metadata operations acquire only Domain B locks.
+- Queue locks (`TaskQueue::m_mutex` and `CompletionQueue::m_mutex`), `TcpServer::m_reaper_mutex`, and `Logger::m_mutex` are leaf locks with microsecond durations; they are never held while acquiring any storage or coordinator locks.
 
 ---
 
@@ -125,3 +148,46 @@ To mathematically prevent deadlocks (violating Coffman's circular wait condition
    - If a client stops reading and its unsent output buffer exceeds `--max-output-buffer-bytes` (default 8 MiB), the server logs a warning and forcibly closes the connection to protect server memory.
 4. **Slow-Loris Defense**:
    - If a client sends partial frame bytes and fails to complete the frame within `--read-stall-timeout-sec` (default 30s), the server terminates the connection. Idle connections (0 bytes buffered) are not penalized.
+
+---
+
+## 5. Background Reaper Thread Concurrency Model
+
+Milestone 5 introduces consumer group membership with heartbeat tracking and automatic session expiration.
+
+```
+┌────────────────────────────────────────────────────────┐
+│               Background Reaper Thread                 │
+│                                                        │
+│  loop:                                                 │
+│    m_reaper_cv.wait_for(lock, 1000ms, shutdown_pred)   │
+│    if (shutdown) break;                                │
+│    coordinator.expire_members(steady_clock::now())     │
+└──────────────────────────┬─────────────────────────────┘
+                           │
+                           ▼
+          ┌───────────────────────────────────┐
+          │ Acquires m_groups_mutex (shared)  │
+          └────────────────┬──────────────────┘
+                           │
+             Iterates each group in registry
+                           │
+                           ▼
+          ┌───────────────────────────────────┐
+          │ Locks target Group::m_mutex       │
+          │ - Scans members for timeout       │
+          │ - If expired: marks DEAD          │
+          │ - Triggers group rebalance        │
+          │ - Bumps generation_id             │
+          │ Releases Group::m_mutex           │
+          └───────────────────────────────────┘
+```
+
+### Safety and Non-Blocking Guarantees
+1. **Decoupled from Network Event Loop**:
+   The reaper thread runs completely independently of the `WSAPoll` network loop. The I/O thread never pauses, sleeps, or scans member lists for expiration, guaranteeing that network throughput and socket responsiveness remain unaffected by heartbeat expirations.
+2. **Granular Group Locking**:
+   The reaper thread acquires `m_groups_mutex` in shared (read) mode. It iterates over existing group references and acquires each `Group::m_mutex` individually only for the duration of the member timestamp check. Unaffected groups and concurrent client requests to other groups proceed without blocking.
+3. **Clean Teardown Synchronization**:
+   During server shutdown, `TcpServer::stop()` sets `m_shutdown_requested = true` and signals `m_reaper_cv.notify_all()`. The reaper thread immediately exits its condition wait, completes its current loop, and joins cleanly before socket or storage resources are released.
+

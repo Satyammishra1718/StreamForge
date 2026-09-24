@@ -195,8 +195,13 @@ int main(int argc, char* argv[]) {
             process_delay_ms_arg = static_cast<uint32_t>(std::stoul(argv[++i]));
         } else if (arg == "--max-records" && i + 1 < argc) {
             max_records_arg = static_cast<size_t>(std::stoul(argv[++i]));
-        } else if (arg == "--idle-exit-ms" && i + 1 < argc) {
-            idle_exit_ms_arg = static_cast<uint64_t>(std::stoull(argv[++i]));
+        } else if ((arg == "--idle-exit-ms" || arg == "--idle-exit") && i + 1 < argc) {
+            uint64_t val = static_cast<uint64_t>(std::stoull(argv[++i]));
+            if (arg == "--idle-exit" && val <= 120) {
+                idle_exit_ms_arg = val * 1000;
+            } else {
+                idle_exit_ms_arg = val;
+            }
         } else if (arg == "--crash-after" && i + 1 < argc) {
             crash_after_arg = static_cast<size_t>(std::stoul(argv[++i]));
         } else if (command.empty() && arg.rfind("--", 0) != 0) {
@@ -1063,7 +1068,7 @@ int main(int argc, char* argv[]) {
                 std::cerr << "Failed to set console control handler\n";
             }
 
-            std::string member_id = "";
+            std::string member_id = member_arg;
             uint32_t generation = 0;
             uint32_t heartbeat_interval_ms = session_timeout_ms_arg / 3;
             std::vector<TopicPartitionWire> assignments;
@@ -1075,6 +1080,14 @@ int main(int argc, char* argv[]) {
             auto last_record_time = std::chrono::steady_clock::now();
 
             auto do_join = [&](bool is_rebalance) -> bool {
+                if (!sock.is_valid()) {
+                    for (int attempt = 0; attempt < 25; ++attempt) {
+                        if (connect_socket(sock, host, port)) break;
+                        std::this_thread::sleep_for(std::chrono::milliseconds(200));
+                    }
+                    if (!sock.is_valid()) return false;
+                }
+
                 JoinGroupRequest join_req;
                 join_req.group_id = group_id;
                 join_req.member_id = member_id;
@@ -1090,6 +1103,18 @@ int main(int argc, char* argv[]) {
                 Frame resp;
 
                 if (!send_and_receive(sock, req, resp)) {
+                    // If connection dropped, reconnect once
+                    if (!sock.is_valid()) {
+                        for (int attempt = 0; attempt < 25; ++attempt) {
+                            if (connect_socket(sock, host, port)) break;
+                            std::this_thread::sleep_for(std::chrono::milliseconds(200));
+                        }
+                        if (sock.is_valid()) {
+                            req.request_id = req_id++;
+                            send_and_receive(sock, req, resp);
+                        }
+                    }
+
                     // Check if error is 14 (unknown group or member); if so, retry with empty member_id
                     if (resp.type == MessageType::MSG_ERROR) {
                         uint16_t code = 0; std::string msg;
@@ -1211,8 +1236,10 @@ int main(int argc, char* argv[]) {
                 Frame co_resp;
 
                 std::vector<uint8_t> encoded = FrameCodec::encode(co_frame);
-                if (sock.send_all(encoded.data(), encoded.size()) != SendResult::Success) return -1;
-                if (!read_response_frame(sock, co_resp)) return -1;
+                if (sock.send_all(encoded.data(), encoded.size()) != SendResult::Success || !read_response_frame(sock, co_resp)) {
+                    sock.close();
+                    return 15;
+                }
 
                 if (co_resp.type == MessageType::MSG_ERROR) {
                     uint16_t code = 0; std::string msg;
@@ -1238,8 +1265,10 @@ int main(int argc, char* argv[]) {
                 Frame hb_resp;
 
                 std::vector<uint8_t> encoded = FrameCodec::encode(hb_frame);
-                if (sock.send_all(encoded.data(), encoded.size()) != SendResult::Success) return -1;
-                if (!read_response_frame(sock, hb_resp)) return -1;
+                if (sock.send_all(encoded.data(), encoded.size()) != SendResult::Success || !read_response_frame(sock, hb_resp)) {
+                    sock.close();
+                    return 15;
+                }
 
                 if (hb_resp.type == MessageType::MSG_ERROR) {
                     uint16_t code = 0; std::string msg;
@@ -1263,7 +1292,7 @@ int main(int argc, char* argv[]) {
                 }
 
                 auto now = std::chrono::steady_clock::now();
-                if (idle_exit_ms_arg > 0 && total_records_processed > 0) {
+                if (idle_exit_ms_arg > 0) {
                     auto idle_ms = std::chrono::duration_cast<std::chrono::milliseconds>(now - last_record_time).count();
                     if (static_cast<uint64_t>(idle_ms) >= idle_exit_ms_arg) {
                         break;
@@ -1301,8 +1330,11 @@ int main(int argc, char* argv[]) {
                     Frame resp;
 
                     std::vector<uint8_t> enc = FrameCodec::encode(req);
-                    if (sock.send_all(enc.data(), enc.size()) != SendResult::Success) break;
-                    if (!read_response_frame(sock, resp)) break;
+                    if (sock.send_all(enc.data(), enc.size()) != SendResult::Success || !read_response_frame(sock, resp)) {
+                        sock.close();
+                        do_join(true);
+                        break;
+                    }
 
                     if (resp.type == MessageType::MSG_ERROR) {
                         uint16_t code = 0; std::string msg;
