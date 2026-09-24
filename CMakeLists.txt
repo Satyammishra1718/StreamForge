@@ -14,7 +14,7 @@ endif()
 
 include_directories(include)
 
-# Core library containing shared Winsock, networking, protocol, and server code
+# Core library containing shared Winsock, networking, protocol, and storage engine code
 add_library(streamforge_core STATIC
     src/WinsockRuntime.cpp
     src/Socket.cpp
@@ -23,6 +23,14 @@ add_library(streamforge_core STATIC
     src/MessageHandler.cpp
     src/TcpServer.cpp
     src/Logger.cpp
+    src/Crc32.cpp
+    src/RecordCodec.cpp
+    src/OffsetIndex.cpp
+    src/LogSegment.cpp
+    src/Partition.cpp
+    src/Partitioner.cpp
+    src/Topic.cpp
+    src/TopicManager.cpp
 )
 
 target_include_directories(streamforge_core PUBLIC include)
@@ -35,3 +43,11 @@ target_link_libraries(streamforge_server PRIVATE streamforge_core)
 # Test CLI executable
 add_executable(streamforge_cli src/cli_main.cpp)
 target_link_libraries(streamforge_cli PRIVATE streamforge_core)
+
+# Storage Tool executable
+add_executable(streamforge_storage src/storage_main.cpp)
+target_link_libraries(streamforge_storage PRIVATE streamforge_core)
+
+# Storage Unit Tests executable
+add_executable(streamforge_storage_tests tests/storage_tests.cpp)
+target_link_libraries(streamforge_storage_tests PRIVATE streamforge_core)

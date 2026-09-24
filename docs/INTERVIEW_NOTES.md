@@ -55,3 +55,67 @@ Every client request processed by StreamForge follows a clear 6-step lifecycle:
 - **Evolution Plan**:
   - **Milestone 4**: We will introduce a **Thread Pool** with a task queue to decouple thread counts from connection counts.
   - **Future High-Performance Iteration**: We can leverage Windows **IOCP** (Input/Output Completion Ports) with asynchronous non-blocking I/O (`WSARecv`/`WSASend`) for event-driven $O(1)$ scalability under tens of thousands of concurrent connections.
+
+---
+
+## Milestone 2: Partitioned Append-Only Log Storage Engine
+
+### 1. Storage Operations Walkthrough
+
+#### A. Appending One Record
+1. **Partition Selection**: If a key is provided, `KeyHashPartitioner` hashes the key using FNV-1a (`hash(key) % num_partitions`) to map the message to a specific partition ID. If no key is provided, `RoundRobinPartitioner` cycles through partitions.
+2. **Locking & Segment Capacity Check**: The `Partition` locks its mutex. It retrieves the current active `LogSegment` (the last segment in the partition). If adding the new record would exceed `segment_max_bytes` (and the active segment is not empty), the active segment is sealed and a new `LogSegment` is created with `base_offset` equal to `next_offset`.
+3. **Record Encoding**: `RecordCodec::encode()` serializes the record:
+   - Sets 64-bit monotonically increasing `offset` and 64-bit Unix timestamp `timestamp_ms`.
+   - Packs header fields in Big-Endian: `[u32 length][u32 crc32][u64 offset][i64 timestamp_ms][u32 key_len][bytes key][bytes value]`.
+   - Computes table-driven IEEE 802.3 CRC32 over `[offset ... value]` payload and stores it in the header.
+4. **Sparse Indexing**: If this is the segment's first record OR the byte distance since the last index entry is `>= index_interval_bytes` (4096 bytes), a new index entry `[u32 relative_offset][u32 file_position]` is appended to the in-memory `OffsetIndex` and written to the `.index` file.
+5. **Disk Write & Sync**: The encoded record buffer is written to the `.log` file at the current end of file using `WriteFile()`. If `sync_on_append == true`, `FlushFileBuffers()` is invoked to force OS kernel dirty pages to physical storage before returning the assigned offset.
+
+#### B. Reading Offset 1,234 from a Partition with 5 Segments
+1. **Segment Binary Search**: The `Partition` binary searches its list of 5 `LogSegment`s by `base_offset` to find the segment where `base_offset <= 1234 < next_segment.base_offset`.
+2. **Sparse Index Binary Search**: Inside that segment's in-memory `OffsetIndex`, it binary searches for the entry with the largest `relative_offset <= (1234 - base_offset)`. This yields an exact `.log` file byte position $P$.
+3. **Positional Read & Forward Scan**: The server executes a positional read at file position $P$ using `ReadFile()` with an `OVERLAPPED` offset structure (without altering the Win32 file pointer).
+4. **Sequential Record Verification**: The reader decodes records sequentially starting at $P$:
+   - Parses each record header, verifies its length, and validates its CRC32 checksum.
+   - Skips records with `offset < 1234`.
+   - Collects records into the `ReadResult` buffer once `offset >= 1234` until `max_messages` or `max_bytes` limit is met (spanning into subsequent segments if needed).
+
+---
+
+### 2. Deep-Dive Storage Questions & Answers
+
+#### Q1: Why an append-only log? Why is sequential writing fast?
+- **Sequential vs. Random I/O**: Solid-State Drives (SSDs) and traditional Hard Disk Drives (HDDs) execute sequential writes orders of magnitude faster than random writes because sequential I/O avoids random block erase cycles on SSD flash cells and disk head positioning delays on HDDs.
+- **No In-Place Modifications**: In an append-only log, new records are always appended at the end of the file. Existing data is immutable, eliminating lock contention for updates, fragmentation, and complex B-Tree page rebalancing.
+
+#### Q2: Why split the log into segments?
+- **Garbage Collection & Retention**: Old data can be purged or archived by simply deleting old segment files (`.log` and `.index` pairs) in $O(1)$ filesystem operations without rewriting active data files.
+- **Index Efficiency & Memory Footprint**: Smaller individual segment files keep index entries compact (using 32-bit relative offsets instead of 64-bit absolute offsets).
+- **Crash Recovery Scope**: On startup, only the active segment needs full recovery scanning and index rebuilding; older sealed segments can be trusted.
+
+#### Q3: Why a sparse index instead of one entry per record?
+- **Memory Footprint**: An index with one entry per record scales linearly with message count, consuming massive RAM. A sparse index (recording byte position once every 4 KB) reduces index memory overhead by 10x to 100x while keeping lookup fast.
+- **Time Complexity**: Finding a record takes $O(\log N_{\text{index}} + k)$ where $N_{\text{index}}$ is the number of sparse index entries and $k$ is the small sequential scan distance within the 4 KB chunk ($k \le 4096$ bytes).
+
+#### Q4: What is the CRC for, and what does it not protect against?
+- **Purpose**: The 32-bit CRC32 checksum protects against silent data corruption, bit rot, torn writes, or partial disk flushes during power failure by verifying payload integrity on read.
+- **What it does NOT protect against**:
+  - Malicious tampering (CRC32 is not cryptographically secure; an adversary can recalculate valid CRCs for altered data; SHA-256 or HMAC would be required).
+  - Whole-file deletion or filesystem metadata corruption.
+
+#### Q5: What does `FlushFileBuffers` do, and what is the cost of `sync_on_append`?
+- **`FlushFileBuffers(HANDLE)`**: Forces the Windows kernel page cache to push dirty file pages directly to physical storage media (flushing drive write caches).
+- **Cost**: Calling `FlushFileBuffers` on every append (`sync_on_append == true`) guarantees zero data loss on sudden power loss, but severely limits throughput to the physical disk latency (e.g. ~100-500 IOPS on HDDs or ~10,000 IOPS on SSDs). Setting `sync_on_append == false` relies on OS background page flushing for 10x-100x higher throughput, trading off potential loss of un-flushed tail records during sudden hardware power failure.
+
+#### Q6: Why does the same key always land in the same partition, and what ordering guarantee does that give? What guarantee is NOT given across partitions?
+- **Key Partitioning**: `KeyHashPartitioner` computes `hash(key) % num_partitions`. Because the hash function is deterministic, any record with key $K$ lands in partition $P_k$ every time.
+- **Partition-Level Ordering Guarantee**: Records within a single partition are strictly ordered by offset (0, 1, 2, ...). Therefore, all messages for key $K$ are processed in exact write sequence.
+- **Cross-Partition Non-Guarantee**: StreamForge (like Apache Kafka) provides **NO global ordering guarantee across different partitions**. Messages written to Partition 0 and Partition 1 concurrently have independent offset sequences.
+
+#### Q7: What can go wrong if the machine loses power mid-append, and how does our startup scan handle it?
+- **Failure Mode**: A power outage mid-append leaves a "torn tail"—a partially written record or incomplete length header at the end of the active `.log` file.
+- **Startup Recovery Scan**:
+  - `TopicManager` scans the active segment from byte 0 to the end of file.
+  - It validates the header length, payload bounds, and CRC32 checksum for every record.
+  - When it encounters a torn/corrupted tail record, it truncates the `.log` file back to the end of the last fully valid record using `SetEndOfFile()`, logs a `WARNING` specifying how many partial bytes were truncated, and sets `next_offset` to continue cleanly from the last valid record. Valid records are never lost.
