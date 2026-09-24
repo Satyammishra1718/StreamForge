@@ -239,6 +239,326 @@ struct DescribeTopicResponse {
     }
 };
 
+// ─────────────────────────────────────────────────────────────────────────────
+// M5 Consumer Group Request Structures
+// ─────────────────────────────────────────────────────────────────────────────
+
+struct JoinGroupRequest {
+    std::string group_id;
+    std::string member_id;
+    uint32_t session_timeout_ms{0};
+    uint8_t strategy{0}; // 0 = Range, 1 = RoundRobin
+    uint16_t topic_count{0};
+    std::vector<std::string> topics;
+
+    bool decode(BodyReader& reader) {
+        if (!reader.read_string(group_id)) return false;
+        if (!reader.read_string(member_id)) return false;
+        if (!reader.read_u32(session_timeout_ms)) return false;
+        if (!reader.read_u8(strategy)) return false;
+        if (!reader.read_u16(topic_count)) return false;
+        if (reader.remaining() < static_cast<size_t>(topic_count) * 2) return false;
+        topics.resize(topic_count);
+        for (uint16_t i = 0; i < topic_count; ++i) {
+            if (!reader.read_string(topics[i])) return false;
+        }
+        return reader.require_empty();
+    }
+
+    void encode(BodyWriter& writer) const {
+        writer.write_string(group_id);
+        writer.write_string(member_id);
+        writer.write_u32(session_timeout_ms);
+        writer.write_u8(strategy);
+        writer.write_u16(static_cast<uint16_t>(topics.size()));
+        for (const auto& t : topics) {
+            writer.write_string(t);
+        }
+    }
+};
+
+struct HeartbeatRequest {
+    std::string group_id;
+    std::string member_id;
+    uint32_t generation{0};
+
+    bool decode(BodyReader& reader) {
+        return reader.read_string(group_id) &&
+               reader.read_string(member_id) &&
+               reader.read_u32(generation) &&
+               reader.require_empty();
+    }
+
+    void encode(BodyWriter& writer) const {
+        writer.write_string(group_id);
+        writer.write_string(member_id);
+        writer.write_u32(generation);
+    }
+};
+
+struct LeaveGroupRequest {
+    std::string group_id;
+    std::string member_id;
+
+    bool decode(BodyReader& reader) {
+        return reader.read_string(group_id) &&
+               reader.read_string(member_id) &&
+               reader.require_empty();
+    }
+
+    void encode(BodyWriter& writer) const {
+        writer.write_string(group_id);
+        writer.write_string(member_id);
+    }
+};
+
+struct CommitOffsetItemWire {
+    std::string topic;
+    uint16_t partition{0};
+    uint64_t offset{0};
+};
+
+struct CommitOffsetRequest {
+    std::string group_id;
+    std::string member_id;
+    uint32_t generation{0};
+    uint16_t count{0};
+    std::vector<CommitOffsetItemWire> entries;
+
+    bool decode(BodyReader& reader) {
+        if (!reader.read_string(group_id)) return false;
+        if (!reader.read_string(member_id)) return false;
+        if (!reader.read_u32(generation)) return false;
+        if (!reader.read_u16(count)) return false;
+        if (reader.remaining() < static_cast<size_t>(count) * 12) return false;
+        entries.resize(count);
+        for (uint16_t i = 0; i < count; ++i) {
+            if (!reader.read_string(entries[i].topic)) return false;
+            if (!reader.read_u16(entries[i].partition)) return false;
+            if (!reader.read_u64(entries[i].offset)) return false;
+        }
+        return reader.require_empty();
+    }
+
+    void encode(BodyWriter& writer) const {
+        writer.write_string(group_id);
+        writer.write_string(member_id);
+        writer.write_u32(generation);
+        writer.write_u16(static_cast<uint16_t>(entries.size()));
+        for (const auto& e : entries) {
+            writer.write_string(e.topic);
+            writer.write_u16(e.partition);
+            writer.write_u64(e.offset);
+        }
+    }
+};
+
+struct FetchOffsetQueryWire {
+    std::string topic;
+    uint16_t partition{0};
+};
+
+struct FetchOffsetRequest {
+    std::string group_id;
+    uint16_t count{0};
+    std::vector<FetchOffsetQueryWire> queries;
+
+    bool decode(BodyReader& reader) {
+        if (!reader.read_string(group_id)) return false;
+        if (!reader.read_u16(count)) return false;
+        if (reader.remaining() < static_cast<size_t>(count) * 4) return false;
+        queries.resize(count);
+        for (uint16_t i = 0; i < count; ++i) {
+            if (!reader.read_string(queries[i].topic)) return false;
+            if (!reader.read_u16(queries[i].partition)) return false;
+        }
+        return reader.require_empty();
+    }
+
+    void encode(BodyWriter& writer) const {
+        writer.write_string(group_id);
+        writer.write_u16(static_cast<uint16_t>(queries.size()));
+        for (const auto& q : queries) {
+            writer.write_string(q.topic);
+            writer.write_u16(q.partition);
+        }
+    }
+};
+
+struct DescribeGroupRequest {
+    std::string group_id;
+
+    bool decode(BodyReader& reader) {
+        return reader.read_string(group_id) &&
+               reader.require_empty();
+    }
+
+    void encode(BodyWriter& writer) const {
+        writer.write_string(group_id);
+    }
+};
+
+// ─────────────────────────────────────────────────────────────────────────────
+// M5 Consumer Group Response Structures
+// ─────────────────────────────────────────────────────────────────────────────
+
+struct TopicPartitionWire {
+    std::string topic;
+    uint16_t partition{0};
+};
+
+struct JoinGroupResponse {
+    std::string member_id;
+    uint32_t generation{0};
+    uint32_t heartbeat_interval_ms{0};
+    uint16_t count{0};
+    std::vector<TopicPartitionWire> assignments;
+
+    void encode(BodyWriter& writer) const {
+        writer.write_string(member_id);
+        writer.write_u32(generation);
+        writer.write_u32(heartbeat_interval_ms);
+        writer.write_u16(static_cast<uint16_t>(assignments.size()));
+        for (const auto& a : assignments) {
+            writer.write_string(a.topic);
+            writer.write_u16(a.partition);
+        }
+    }
+
+    bool decode(BodyReader& reader) {
+        if (!reader.read_string(member_id)) return false;
+        if (!reader.read_u32(generation)) return false;
+        if (!reader.read_u32(heartbeat_interval_ms)) return false;
+        if (!reader.read_u16(count)) return false;
+        if (reader.remaining() < static_cast<size_t>(count) * 4) return false;
+        assignments.resize(count);
+        for (uint16_t i = 0; i < count; ++i) {
+            if (!reader.read_string(assignments[i].topic)) return false;
+            if (!reader.read_u16(assignments[i].partition)) return false;
+        }
+        return reader.require_empty();
+    }
+};
+
+struct HeartbeatResponse {
+    void encode(BodyWriter& writer) const {
+        (void)writer;
+    }
+
+    bool decode(BodyReader& reader) {
+        return reader.require_empty();
+    }
+};
+
+struct LeaveGroupResponse {
+    void encode(BodyWriter& writer) const {
+        (void)writer;
+    }
+
+    bool decode(BodyReader& reader) {
+        return reader.require_empty();
+    }
+};
+
+struct CommitOffsetResponse {
+    void encode(BodyWriter& writer) const {
+        (void)writer;
+    }
+
+    bool decode(BodyReader& reader) {
+        return reader.require_empty();
+    }
+};
+
+struct OffsetEntryWire {
+    std::string topic;
+    uint16_t partition{0};
+    int64_t offset{-1};
+};
+
+struct FetchOffsetResponse {
+    uint16_t count{0};
+    std::vector<OffsetEntryWire> offsets;
+
+    void encode(BodyWriter& writer) const {
+        writer.write_u16(static_cast<uint16_t>(offsets.size()));
+        for (const auto& o : offsets) {
+            writer.write_string(o.topic);
+            writer.write_u16(o.partition);
+            writer.write_i64(o.offset);
+        }
+    }
+
+    bool decode(BodyReader& reader) {
+        if (!reader.read_u16(count)) return false;
+        if (reader.remaining() < static_cast<size_t>(count) * 12) return false;
+        offsets.resize(count);
+        for (uint16_t i = 0; i < count; ++i) {
+            if (!reader.read_string(offsets[i].topic)) return false;
+            if (!reader.read_u16(offsets[i].partition)) return false;
+            if (!reader.read_i64(offsets[i].offset)) return false;
+        }
+        return reader.require_empty();
+    }
+};
+
+struct MemberDescriptionWire {
+    std::string member_id;
+    uint32_t session_timeout_ms{0};
+    uint32_t ms_since_heartbeat{0};
+    uint16_t count{0};
+    std::vector<TopicPartitionWire> assignment;
+};
+
+struct DescribeGroupResponse {
+    std::string group_id;
+    uint32_t generation{0};
+    std::string state;
+    uint8_t strategy{0};
+    uint16_t member_count{0};
+    std::vector<MemberDescriptionWire> members;
+
+    void encode(BodyWriter& writer) const {
+        writer.write_string(group_id);
+        writer.write_u32(generation);
+        writer.write_string(state);
+        writer.write_u8(strategy);
+        writer.write_u16(static_cast<uint16_t>(members.size()));
+        for (const auto& m : members) {
+            writer.write_string(m.member_id);
+            writer.write_u32(m.session_timeout_ms);
+            writer.write_u32(m.ms_since_heartbeat);
+            writer.write_u16(static_cast<uint16_t>(m.assignment.size()));
+            for (const auto& a : m.assignment) {
+                writer.write_string(a.topic);
+                writer.write_u16(a.partition);
+            }
+        }
+    }
+
+    bool decode(BodyReader& reader) {
+        if (!reader.read_string(group_id)) return false;
+        if (!reader.read_u32(generation)) return false;
+        if (!reader.read_string(state)) return false;
+        if (!reader.read_u8(strategy)) return false;
+        if (!reader.read_u16(member_count)) return false;
+        members.resize(member_count);
+        for (uint16_t i = 0; i < member_count; ++i) {
+            if (!reader.read_string(members[i].member_id)) return false;
+            if (!reader.read_u32(members[i].session_timeout_ms)) return false;
+            if (!reader.read_u32(members[i].ms_since_heartbeat)) return false;
+            if (!reader.read_u16(members[i].count)) return false;
+            if (reader.remaining() < static_cast<size_t>(members[i].count) * 4) return false;
+            members[i].assignment.resize(members[i].count);
+            for (uint16_t j = 0; j < members[i].count; ++j) {
+                if (!reader.read_string(members[i].assignment[j].topic)) return false;
+                if (!reader.read_u16(members[i].assignment[j].partition)) return false;
+            }
+        }
+        return reader.require_empty();
+    }
+};
+
 } // namespace streamforge
 
 #endif // STREAMFORGE_PROTOCOL_MESSAGES_HPP

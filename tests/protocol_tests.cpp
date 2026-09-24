@@ -3,6 +3,8 @@
 #include "streamforge/ProtocolMessages.hpp"
 #include "streamforge/MessageHandler.hpp"
 #include "streamforge/TopicManager.hpp"
+#include "streamforge/OffsetStore.hpp"
+#include "streamforge/GroupCoordinator.hpp"
 #include <filesystem>
 #include <vector>
 #include <string>
@@ -142,6 +144,157 @@ TEST_CASE(message_structs_roundtrip) {
         CHECK_EQ(dec.partition_offsets[0].next_offset, 150ull);
         CHECK_EQ(dec.partition_offsets[1].next_offset, 300ull);
     }
+
+    // JoinGroupRequest & Response
+    {
+        JoinGroupRequest req{"grp1", "mem1", 3000, 1, 2, {"t1", "t2"}};
+        BodyWriter w;
+        req.encode(w);
+        BodyReader r(w.buffer());
+        JoinGroupRequest dec;
+        CHECK_TRUE(dec.decode(r));
+        CHECK_EQ(dec.group_id, "grp1");
+        CHECK_EQ(dec.member_id, "mem1");
+        CHECK_EQ(dec.session_timeout_ms, 3000u);
+        CHECK_EQ(dec.strategy, 1u);
+        CHECK_EQ(dec.topics.size(), 2u);
+        CHECK_EQ(dec.topics[0], "t1");
+        CHECK_EQ(dec.topics[1], "t2");
+
+        JoinGroupResponse resp{"mem1", 5, 1000, 1, {{"t1", 0}}};
+        BodyWriter w2;
+        resp.encode(w2);
+        BodyReader r2(w2.buffer());
+        JoinGroupResponse dec2;
+        CHECK_TRUE(dec2.decode(r2));
+        CHECK_EQ(dec2.member_id, "mem1");
+        CHECK_EQ(dec2.generation, 5u);
+        CHECK_EQ(dec2.heartbeat_interval_ms, 1000u);
+        CHECK_EQ(dec2.assignments.size(), 1u);
+        CHECK_EQ(dec2.assignments[0].topic, "t1");
+        CHECK_EQ(dec2.assignments[0].partition, 0u);
+    }
+
+    // HeartbeatRequest & Response
+    {
+        HeartbeatRequest req{"grp1", "mem1", 42};
+        BodyWriter w;
+        req.encode(w);
+        BodyReader r(w.buffer());
+        HeartbeatRequest dec;
+        CHECK_TRUE(dec.decode(r));
+        CHECK_EQ(dec.group_id, "grp1");
+        CHECK_EQ(dec.member_id, "mem1");
+        CHECK_EQ(dec.generation, 42u);
+
+        HeartbeatResponse resp;
+        BodyWriter w2;
+        resp.encode(w2);
+        BodyReader r2(w2.buffer());
+        HeartbeatResponse dec2;
+        CHECK_TRUE(dec2.decode(r2));
+    }
+
+    // LeaveGroupRequest & Response
+    {
+        LeaveGroupRequest req{"grp1", "mem1"};
+        BodyWriter w;
+        req.encode(w);
+        BodyReader r(w.buffer());
+        LeaveGroupRequest dec;
+        CHECK_TRUE(dec.decode(r));
+        CHECK_EQ(dec.group_id, "grp1");
+        CHECK_EQ(dec.member_id, "mem1");
+
+        LeaveGroupResponse resp;
+        BodyWriter w2;
+        resp.encode(w2);
+        BodyReader r2(w2.buffer());
+        LeaveGroupResponse dec2;
+        CHECK_TRUE(dec2.decode(r2));
+    }
+
+    // CommitOffsetRequest & Response
+    {
+        CommitOffsetRequest req{"grp1", "mem1", 2, 2, {{"t1", 0, 100}, {"t2", 1, 200}}};
+        BodyWriter w;
+        req.encode(w);
+        BodyReader r(w.buffer());
+        CommitOffsetRequest dec;
+        CHECK_TRUE(dec.decode(r));
+        CHECK_EQ(dec.group_id, "grp1");
+        CHECK_EQ(dec.member_id, "mem1");
+        CHECK_EQ(dec.generation, 2u);
+        CHECK_EQ(dec.entries.size(), 2u);
+        CHECK_EQ(dec.entries[0].topic, "t1");
+        CHECK_EQ(dec.entries[0].offset, 100ull);
+        CHECK_EQ(dec.entries[1].topic, "t2");
+        CHECK_EQ(dec.entries[1].partition, 1u);
+        CHECK_EQ(dec.entries[1].offset, 200ull);
+
+        CommitOffsetResponse resp;
+        BodyWriter w2;
+        resp.encode(w2);
+        BodyReader r2(w2.buffer());
+        CommitOffsetResponse dec2;
+        CHECK_TRUE(dec2.decode(r2));
+    }
+
+    // FetchOffsetRequest & Response
+    {
+        FetchOffsetRequest req{"grp1", 2, {{"t1", 0}, {"t2", 1}}};
+        BodyWriter w;
+        req.encode(w);
+        BodyReader r(w.buffer());
+        FetchOffsetRequest dec;
+        CHECK_TRUE(dec.decode(r));
+        CHECK_EQ(dec.group_id, "grp1");
+        CHECK_EQ(dec.queries.size(), 2u);
+        CHECK_EQ(dec.queries[0].topic, "t1");
+        CHECK_EQ(dec.queries[1].partition, 1u);
+
+        FetchOffsetResponse resp{2, {{"t1", 0, 150}, {"t2", 1, -1}}};
+        BodyWriter w2;
+        resp.encode(w2);
+        BodyReader r2(w2.buffer());
+        FetchOffsetResponse dec2;
+        CHECK_TRUE(dec2.decode(r2));
+        CHECK_EQ(dec2.offsets.size(), 2u);
+        CHECK_EQ(dec2.offsets[0].offset, 150);
+        CHECK_EQ(dec2.offsets[1].offset, -1);
+    }
+
+    // DescribeGroupRequest & Response
+    {
+        DescribeGroupRequest req{"grp1"};
+        BodyWriter w;
+        req.encode(w);
+        BodyReader r(w.buffer());
+        DescribeGroupRequest dec;
+        CHECK_TRUE(dec.decode(r));
+        CHECK_EQ(dec.group_id, "grp1");
+
+        DescribeGroupResponse resp;
+        resp.group_id = "grp1";
+        resp.generation = 3;
+        resp.state = "Stable";
+        resp.strategy = 0;
+        resp.member_count = 1;
+        resp.members.push_back({"mem1", 3000, 150, 1, {{"t1", 0}}});
+
+        BodyWriter w2;
+        resp.encode(w2);
+        BodyReader r2(w2.buffer());
+        DescribeGroupResponse dec2;
+        CHECK_TRUE(dec2.decode(r2));
+        CHECK_EQ(dec2.group_id, "grp1");
+        CHECK_EQ(dec2.generation, 3u);
+        CHECK_EQ(dec2.state, "Stable");
+        CHECK_EQ(dec2.strategy, 0u);
+        CHECK_EQ(dec2.members.size(), 1u);
+        CHECK_EQ(dec2.members[0].member_id, "mem1");
+        CHECK_EQ(dec2.members[0].assignment[0].topic, "t1");
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -158,7 +311,10 @@ TEST_CASE(malformed_body_validation_no_crash) {
         CHECK(topic_mgr.open_and_recover_all().ok());
         CHECK(topic_mgr.create_topic("test_topic", 2).ok());
 
-        MessageHandler handler(topic_mgr);
+        OffsetStore offset_store;
+        CHECK(offset_store.open_and_recover(topic_mgr).ok());
+        GroupCoordinator coordinator(topic_mgr, offset_store);
+        MessageHandler handler(topic_mgr, &coordinator);
 
         // a) Truncated CREATE_TOPIC body (only topic string, missing partitions u16)
         {
@@ -367,6 +523,197 @@ TEST_CASE(malformed_body_validation_no_crash) {
             CHECK_EQ(resp.type, MessageType::MSG_ERROR);
             uint16_t code = 0; std::string msg;
             FrameCodec::parse_error_frame(resp, code, msg);
+            CHECK_EQ(code, ErrorCode::MALFORMED_BODY);
+        }
+
+        // g) JOIN_GROUP malformed bodies
+        {
+            // Truncated
+            BodyWriter w1;
+            w1.write_string("test_grp");
+            Frame req1{ HEADER_SIZE + static_cast<uint32_t>(w1.buffer().size()), MessageType::JOIN_GROUP, 30, w1.take_buffer() };
+            Frame resp1 = handler.handle_request(req1);
+            CHECK_EQ(resp1.type, MessageType::MSG_ERROR);
+            uint16_t code = 0; std::string msg;
+            FrameCodec::parse_error_frame(resp1, code, msg);
+            CHECK_EQ(code, ErrorCode::MALFORMED_BODY);
+
+            // Lying topic count
+            BodyWriter w2;
+            w2.write_string("test_grp");
+            w2.write_string("");
+            w2.write_u32(3000);
+            w2.write_u8(0);
+            w2.write_u16(100); // Claims 100 topics
+            w2.write_string("test_topic"); // only 1 provided
+            Frame req2{ HEADER_SIZE + static_cast<uint32_t>(w2.buffer().size()), MessageType::JOIN_GROUP, 31, w2.take_buffer() };
+            Frame resp2 = handler.handle_request(req2);
+            CHECK_EQ(resp2.type, MessageType::MSG_ERROR);
+            FrameCodec::parse_error_frame(resp2, code, msg);
+            CHECK_EQ(code, ErrorCode::MALFORMED_BODY);
+
+            // Trailing garbage
+            BodyWriter w3;
+            w3.write_string("test_grp");
+            w3.write_string("");
+            w3.write_u32(3000);
+            w3.write_u8(0);
+            w3.write_u16(1);
+            w3.write_string("test_topic");
+            w3.write_u32(0xDEADBEEF);
+            Frame req3{ HEADER_SIZE + static_cast<uint32_t>(w3.buffer().size()), MessageType::JOIN_GROUP, 32, w3.take_buffer() };
+            Frame resp3 = handler.handle_request(req3);
+            CHECK_EQ(resp3.type, MessageType::MSG_ERROR);
+            FrameCodec::parse_error_frame(resp3, code, msg);
+            CHECK_EQ(code, ErrorCode::MALFORMED_BODY);
+        }
+
+        // h) HEARTBEAT malformed bodies
+        {
+            // Truncated
+            BodyWriter w1;
+            w1.write_string("test_grp");
+            Frame req1{ HEADER_SIZE + static_cast<uint32_t>(w1.buffer().size()), MessageType::HEARTBEAT, 33, w1.take_buffer() };
+            Frame resp1 = handler.handle_request(req1);
+            CHECK_EQ(resp1.type, MessageType::MSG_ERROR);
+            uint16_t code = 0; std::string msg;
+            FrameCodec::parse_error_frame(resp1, code, msg);
+            CHECK_EQ(code, ErrorCode::MALFORMED_BODY);
+
+            // Trailing garbage
+            BodyWriter w2;
+            w2.write_string("test_grp");
+            w2.write_string("mem_1");
+            w2.write_u32(1);
+            w2.write_u32(0xCAFEBABE);
+            Frame req2{ HEADER_SIZE + static_cast<uint32_t>(w2.buffer().size()), MessageType::HEARTBEAT, 34, w2.take_buffer() };
+            Frame resp2 = handler.handle_request(req2);
+            CHECK_EQ(resp2.type, MessageType::MSG_ERROR);
+            FrameCodec::parse_error_frame(resp2, code, msg);
+            CHECK_EQ(code, ErrorCode::MALFORMED_BODY);
+        }
+
+        // i) LEAVE_GROUP malformed bodies
+        {
+            // Truncated
+            BodyWriter w1;
+            w1.write_string("test_grp");
+            Frame req1{ HEADER_SIZE + static_cast<uint32_t>(w1.buffer().size()), MessageType::LEAVE_GROUP, 35, w1.take_buffer() };
+            Frame resp1 = handler.handle_request(req1);
+            CHECK_EQ(resp1.type, MessageType::MSG_ERROR);
+            uint16_t code = 0; std::string msg;
+            FrameCodec::parse_error_frame(resp1, code, msg);
+            CHECK_EQ(code, ErrorCode::MALFORMED_BODY);
+
+            // Trailing garbage
+            BodyWriter w2;
+            w2.write_string("test_grp");
+            w2.write_string("mem_1");
+            w2.write_u32(0xCAFEBABE);
+            Frame req2{ HEADER_SIZE + static_cast<uint32_t>(w2.buffer().size()), MessageType::LEAVE_GROUP, 36, w2.take_buffer() };
+            Frame resp2 = handler.handle_request(req2);
+            CHECK_EQ(resp2.type, MessageType::MSG_ERROR);
+            FrameCodec::parse_error_frame(resp2, code, msg);
+            CHECK_EQ(code, ErrorCode::MALFORMED_BODY);
+        }
+
+        // j) COMMIT_OFFSET malformed bodies
+        {
+            // Truncated
+            BodyWriter w1;
+            w1.write_string("test_grp");
+            Frame req1{ HEADER_SIZE + static_cast<uint32_t>(w1.buffer().size()), MessageType::COMMIT_OFFSET, 37, w1.take_buffer() };
+            Frame resp1 = handler.handle_request(req1);
+            CHECK_EQ(resp1.type, MessageType::MSG_ERROR);
+            uint16_t code = 0; std::string msg;
+            FrameCodec::parse_error_frame(resp1, code, msg);
+            CHECK_EQ(code, ErrorCode::MALFORMED_BODY);
+
+            // Lying count
+            BodyWriter w2;
+            w2.write_string("test_grp");
+            w2.write_string("mem_1");
+            w2.write_u32(1);
+            w2.write_u16(50); // Claims 50 entries
+            Frame req2{ HEADER_SIZE + static_cast<uint32_t>(w2.buffer().size()), MessageType::COMMIT_OFFSET, 38, w2.take_buffer() };
+            Frame resp2 = handler.handle_request(req2);
+            CHECK_EQ(resp2.type, MessageType::MSG_ERROR);
+            FrameCodec::parse_error_frame(resp2, code, msg);
+            CHECK_EQ(code, ErrorCode::MALFORMED_BODY);
+
+            // Trailing garbage
+            BodyWriter w3;
+            w3.write_string("test_grp");
+            w3.write_string("mem_1");
+            w3.write_u32(1);
+            w3.write_u16(1);
+            w3.write_string("test_topic");
+            w3.write_u16(0);
+            w3.write_u64(0);
+            w3.write_u32(0xDEADBEEF);
+            Frame req3{ HEADER_SIZE + static_cast<uint32_t>(w3.buffer().size()), MessageType::COMMIT_OFFSET, 39, w3.take_buffer() };
+            Frame resp3 = handler.handle_request(req3);
+            CHECK_EQ(resp3.type, MessageType::MSG_ERROR);
+            FrameCodec::parse_error_frame(resp3, code, msg);
+            CHECK_EQ(code, ErrorCode::MALFORMED_BODY);
+        }
+
+        // k) FETCH_OFFSET malformed bodies
+        {
+            // Truncated
+            BodyWriter w1;
+            w1.write_string("test_grp");
+            Frame req1{ HEADER_SIZE + static_cast<uint32_t>(w1.buffer().size()), MessageType::FETCH_OFFSET, 40, w1.take_buffer() };
+            Frame resp1 = handler.handle_request(req1);
+            CHECK_EQ(resp1.type, MessageType::MSG_ERROR);
+            uint16_t code = 0; std::string msg;
+            FrameCodec::parse_error_frame(resp1, code, msg);
+            CHECK_EQ(code, ErrorCode::MALFORMED_BODY);
+
+            // Lying count
+            BodyWriter w2;
+            w2.write_string("test_grp");
+            w2.write_u16(50);
+            Frame req2{ HEADER_SIZE + static_cast<uint32_t>(w2.buffer().size()), MessageType::FETCH_OFFSET, 41, w2.take_buffer() };
+            Frame resp2 = handler.handle_request(req2);
+            CHECK_EQ(resp2.type, MessageType::MSG_ERROR);
+            FrameCodec::parse_error_frame(resp2, code, msg);
+            CHECK_EQ(code, ErrorCode::MALFORMED_BODY);
+
+            // Trailing garbage
+            BodyWriter w3;
+            w3.write_string("test_grp");
+            w3.write_u16(1);
+            w3.write_string("test_topic");
+            w3.write_u16(0);
+            w3.write_u32(0xDEADBEEF);
+            Frame req3{ HEADER_SIZE + static_cast<uint32_t>(w3.buffer().size()), MessageType::FETCH_OFFSET, 42, w3.take_buffer() };
+            Frame resp3 = handler.handle_request(req3);
+            CHECK_EQ(resp3.type, MessageType::MSG_ERROR);
+            FrameCodec::parse_error_frame(resp3, code, msg);
+            CHECK_EQ(code, ErrorCode::MALFORMED_BODY);
+        }
+
+        // l) DESCRIBE_GROUP malformed bodies
+        {
+            // Truncated
+            BodyWriter w1;
+            w1.write_u16(50); // string len 50, but nothing follows
+            Frame req1{ HEADER_SIZE + static_cast<uint32_t>(w1.buffer().size()), MessageType::DESCRIBE_GROUP, 43, w1.take_buffer() };
+            Frame resp1 = handler.handle_request(req1);
+            CHECK_EQ(resp1.type, MessageType::MSG_ERROR);
+            uint16_t code = 0; std::string msg;
+            FrameCodec::parse_error_frame(resp1, code, msg);
+            CHECK_EQ(code, ErrorCode::MALFORMED_BODY);
+
+            // Trailing garbage
+            BodyWriter w2;
+            w2.write_string("test_grp");
+            w2.write_u32(0xDEADBEEF);
+            Frame req2{ HEADER_SIZE + static_cast<uint32_t>(w2.buffer().size()), MessageType::DESCRIBE_GROUP, 44, w2.take_buffer() };
+            Frame resp2 = handler.handle_request(req2);
+            CHECK_EQ(resp2.type, MessageType::MSG_ERROR);
+            FrameCodec::parse_error_frame(resp2, code, msg);
             CHECK_EQ(code, ErrorCode::MALFORMED_BODY);
         }
     }

@@ -7,6 +7,8 @@
 
 #include "streamforge/TcpServer.hpp"
 #include "streamforge/TopicManager.hpp"
+#include "streamforge/OffsetStore.hpp"
+#include "streamforge/GroupCoordinator.hpp"
 #include "streamforge/Logger.hpp"
 #include <windows.h>
 
@@ -42,6 +44,9 @@ int main(int argc, char* argv[]) {
     size_t max_connections = 1024;
     uint32_t read_stall_timeout_sec = 30;
     size_t max_output_buffer_bytes = 8 * 1024 * 1024; // 8 MiB
+    uint32_t group_min_session_ms = 1000;
+    uint32_t group_max_session_ms = 60000;
+    uint32_t reaper_interval_ms = 500;
 
     for (int i = 1; i < argc; ++i) {
         std::string arg = argv[i];
@@ -66,6 +71,12 @@ int main(int argc, char* argv[]) {
             read_stall_timeout_sec = static_cast<uint32_t>(std::stoul(argv[++i]));
         } else if (arg == "--max-output-buffer-bytes" && i + 1 < argc) {
             max_output_buffer_bytes = static_cast<size_t>(std::stoull(argv[++i]));
+        } else if (arg == "--group-min-session-ms" && i + 1 < argc) {
+            group_min_session_ms = static_cast<uint32_t>(std::stoul(argv[++i]));
+        } else if (arg == "--group-max-session-ms" && i + 1 < argc) {
+            group_max_session_ms = static_cast<uint32_t>(std::stoul(argv[++i]));
+        } else if (arg == "--reaper-interval-ms" && i + 1 < argc) {
+            reaper_interval_ms = static_cast<uint32_t>(std::stoul(argv[++i]));
         } else if (arg.rfind("--", 0) != 0) {
             port = static_cast<uint16_t>(std::atoi(argv[i]));
         }
@@ -99,9 +110,24 @@ int main(int argc, char* argv[]) {
             return 1;
         }
 
+        // Initialize and recover OffsetStore
+        streamforge::OffsetStore offset_store;
+        streamforge::Status ost = offset_store.open_and_recover(topic_mgr);
+        if (!ost.ok()) {
+            streamforge::Logger::instance().error("Failed to initialize offset store: " + ost.message());
+            return 1;
+        }
+
+        // Initialize GroupCoordinator
+        streamforge::CoordinatorConfig coord_cfg;
+        coord_cfg.min_session_timeout_ms = group_min_session_ms;
+        coord_cfg.max_session_timeout_ms = group_max_session_ms;
+        streamforge::GroupCoordinator coordinator(topic_mgr, offset_store, coord_cfg);
+
         auto topics = topic_mgr.list_topics();
         streamforge::Logger::instance().info("Storage engine initialized (" + std::to_string(topics.size()) + " topics loaded from " + data_dir + ")");
         for (const auto& topic : topics) {
+            if (topic->name().rfind("__", 0) == 0) continue; // Hide reserved topics from user display
             std::string info = "  Topic '" + topic->name() + "' (" + std::to_string(topic->num_partitions()) + " partitions): ";
             for (uint32_t p = 0; p < topic->num_partitions(); ++p) {
                 auto part = topic->get_partition(p);
@@ -110,7 +136,7 @@ int main(int argc, char* argv[]) {
             streamforge::Logger::instance().info(info);
         }
 
-        streamforge::MessageHandler message_handler(topic_mgr);
+        streamforge::MessageHandler message_handler(topic_mgr, &coordinator);
         streamforge::ServerConfig server_cfg;
         server_cfg.host = host;
         server_cfg.port = port;
@@ -118,8 +144,11 @@ int main(int argc, char* argv[]) {
         server_cfg.max_connections = max_connections;
         server_cfg.read_stall_timeout_sec = read_stall_timeout_sec;
         server_cfg.max_output_buffer_bytes = max_output_buffer_bytes;
+        server_cfg.group_min_session_ms = group_min_session_ms;
+        server_cfg.group_max_session_ms = group_max_session_ms;
+        server_cfg.reaper_interval_ms = reaper_interval_ms;
 
-        streamforge::TcpServer server(server_cfg, message_handler);
+        streamforge::TcpServer server(server_cfg, message_handler, &coordinator);
         g_server_instance = &server;
         server.start();
         server.wait_until_stopped();

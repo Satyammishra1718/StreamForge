@@ -46,6 +46,22 @@ namespace MessageType {
     constexpr uint8_t TOPICS            = 0x93;
     constexpr uint8_t TOPIC_DESCRIPTION = 0x94;
 
+    // M5 Request types
+    constexpr uint8_t JOIN_GROUP     = 0x20;
+    constexpr uint8_t HEARTBEAT      = 0x21;
+    constexpr uint8_t LEAVE_GROUP    = 0x22;
+    constexpr uint8_t COMMIT_OFFSET  = 0x23;
+    constexpr uint8_t FETCH_OFFSET   = 0x24;
+    constexpr uint8_t DESCRIBE_GROUP = 0x25;
+
+    // M5 Response types
+    constexpr uint8_t JOIN_GROUP_OK     = 0xA0;
+    constexpr uint8_t HEARTBEAT_OK      = 0xA1;
+    constexpr uint8_t LEAVE_GROUP_OK    = 0xA2;
+    constexpr uint8_t COMMIT_OK         = 0xA3;
+    constexpr uint8_t OFFSETS           = 0xA4;
+    constexpr uint8_t GROUP_DESCRIPTION = 0xA5;
+
     // Error frame
     constexpr uint8_t MSG_ERROR = 0xFF;
 }
@@ -67,6 +83,11 @@ namespace ErrorCode {
     constexpr uint16_t CORRUPT_DATA         = 11;
     constexpr uint16_t INTERNAL_ERROR       = 12;
     constexpr uint16_t INVALID_ARGUMENT     = 13;
+
+    // M5 error codes
+    constexpr uint16_t UNKNOWN_GROUP_OR_MEMBER = 14;
+    constexpr uint16_t ILLEGAL_GENERATION      = 15;
+    constexpr uint16_t PARTITION_NOT_ASSIGNED  = 16;
 }
 
 struct Frame {

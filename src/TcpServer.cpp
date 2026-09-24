@@ -6,9 +6,10 @@
 
 namespace streamforge {
 
-TcpServer::TcpServer(ServerConfig config, MessageHandler handler)
+TcpServer::TcpServer(ServerConfig config, MessageHandler handler, GroupCoordinator* coordinator)
     : m_config(std::move(config)),
-      m_message_handler(std::move(handler)) {
+      m_message_handler(std::move(handler)),
+      m_coordinator(coordinator) {
     // Worker pool: N workers execute request handling and push completions.
     // Workers NEVER touch sockets (Single-Owner Rule).
     m_thread_pool = std::make_unique<ThreadPool>(
@@ -17,7 +18,7 @@ TcpServer::TcpServer(ServerConfig config, MessageHandler handler)
 }
 
 TcpServer::TcpServer(std::string host, uint16_t port, MessageHandler handler)
-    : TcpServer(ServerConfig{std::move(host), port, std::max(2u, std::thread::hardware_concurrency()), 1024, 30, 8 * 1024 * 1024, 2 * 1024 * 1024}, std::move(handler)) {}
+    : TcpServer(ServerConfig{std::move(host), port, std::max(2u, std::thread::hardware_concurrency()), 1024, 30, 8 * 1024 * 1024, 2 * 1024 * 1024, 1000, 60000, 500}, std::move(handler), nullptr) {}
 
 TcpServer::~TcpServer() {
     request_stop();
@@ -35,6 +36,10 @@ void TcpServer::start() {
     m_running = true;
     m_shutdown_requested = false;
 
+    if (m_coordinator) {
+        m_reaper_thread = std::thread(&TcpServer::reaper_loop, this);
+    }
+
     Logger::instance().info("StreamForge server started on " + m_config.host + ":" +
                            std::to_string(m_config.port) + " (workers: " +
                            std::to_string(m_config.workers) + ", max-conn: " +
@@ -44,7 +49,21 @@ void TcpServer::start() {
 
 void TcpServer::request_stop() {
     m_shutdown_requested = true;
+    m_reaper_cv.notify_all();
     m_wakeup.notify();
+}
+
+void TcpServer::reaper_loop() {
+    std::unique_lock<std::mutex> lock(m_reaper_mutex);
+    while (!m_shutdown_requested.load()) {
+        m_reaper_cv.wait_for(lock, std::chrono::milliseconds(m_config.reaper_interval_ms), [this]() {
+            return m_shutdown_requested.load();
+        });
+        if (m_shutdown_requested.load()) break;
+        if (m_coordinator) {
+            m_coordinator->expire_members();
+        }
+    }
 }
 
 void TcpServer::close_connection(uint64_t conn_id) {
@@ -437,6 +456,11 @@ void TcpServer::wait_until_stopped() {
     if (m_thread_pool) {
         m_thread_pool->stop_and_join();
         m_thread_pool.reset();
+    }
+
+    if (m_reaper_thread.joinable()) {
+        m_reaper_cv.notify_all();
+        m_reaper_thread.join();
     }
 
     m_running = false;

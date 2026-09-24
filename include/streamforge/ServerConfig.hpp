@@ -17,6 +17,9 @@ struct ServerConfig {
     uint32_t read_stall_timeout_sec{30};
     size_t max_output_buffer_bytes{8 * 1024 * 1024}; // 8 MiB
     size_t max_input_buffer_bytes{2 * 1024 * 1024};   // 2 MiB
+    uint32_t group_min_session_ms{1000};
+    uint32_t group_max_session_ms{60000};
+    uint32_t reaper_interval_ms{500};
 };
 
 } // namespace streamforge
