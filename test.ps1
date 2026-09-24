@@ -15,16 +15,16 @@ if (-not (Test-Path $serverExe) -or -not (Test-Path $cliExe)) {
 }
 
 $testPort = 9093
-$passed = 0
-$failed = 0
+$script:passed = 0
+$script:failed = 0
 
 function Report-Check($name, $success) {
     if ($success) {
         Write-Host "[PASS] $name" -ForegroundColor Green
-        $global:passed++
+        $script:passed++
     } else {
         Write-Host "[FAIL] $name" -ForegroundColor Red
-        $global:failed++
+        $script:failed++
     }
 }
 
