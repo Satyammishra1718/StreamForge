@@ -94,7 +94,9 @@ Frame MessageHandler::handle_create_topic(const Frame& req) {
         return FrameCodec::create_error_frame(req.request_id, ErrorCode::INVALID_TOPIC_NAME, "Invalid topic name: " + name_err);
     }
 
-    auto res = m_topic_mgr.create_topic(req_msg.topic, req_msg.partitions);
+    uint64_t ret_ms = req_msg.has_retention ? req_msg.retention_ms : 0;
+    uint64_t ret_bytes = req_msg.has_retention ? req_msg.retention_bytes : 0;
+    auto res = m_topic_mgr.create_topic(req_msg.topic, req_msg.partitions, ret_ms, ret_bytes);
     if (!res.ok()) {
         return FrameCodec::create_error_frame(req.request_id, map_status_to_error_code(res.status()), res.status().message());
     }
@@ -265,9 +267,15 @@ Frame MessageHandler::handle_describe_topic(const Frame& req) {
     DescribeTopicResponse resp;
     resp.name = topic->name();
     resp.partitions = static_cast<uint16_t>(topic->num_partitions());
+    resp.retention_ms = topic->retention_ms();
+    resp.retention_bytes = topic->retention_bytes();
+    resp.degraded = topic->is_degraded() ? 1 : 0;
     for (uint32_t p = 0; p < topic->num_partitions(); ++p) {
         auto part = topic->get_partition(p);
-        resp.partition_offsets.push_back({ part->earliest_offset(), part->next_offset() });
+        uint32_t seg_count = part ? static_cast<uint32_t>(part->segment_count()) : 0;
+        uint64_t earliest = part ? part->earliest_offset() : 0;
+        uint64_t next_off = part ? part->next_offset() : 0;
+        resp.partition_offsets.push_back({ earliest, next_off, seg_count });
     }
 
     BodyWriter writer;

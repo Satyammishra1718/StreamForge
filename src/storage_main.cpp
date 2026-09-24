@@ -1,6 +1,7 @@
 #include "streamforge/TopicManager.hpp"
 #include "streamforge/RecordCodec.hpp"
 #include "streamforge/FileHandle.hpp"
+#include "streamforge/RetentionManager.hpp"
 #include <iostream>
 #include <string>
 #include <vector>
@@ -11,11 +12,12 @@ using namespace streamforge;
 
 static void print_usage() {
     std::cout << "Usage:\n"
-              << "  streamforge_storage --data-dir DIR create-topic NAME PARTITIONS\n"
+              << "  streamforge_storage --data-dir DIR create-topic NAME PARTITIONS [--retention-ms N] [--retention-bytes N]\n"
               << "  streamforge_storage --data-dir DIR append TOPIC VALUE [--key K] [--partition P]\n"
               << "  streamforge_storage --data-dir DIR read TOPIC PARTITION START_OFFSET [--max N]\n"
               << "  streamforge_storage --data-dir DIR describe TOPIC\n"
               << "  streamforge_storage --data-dir DIR fill TOPIC COUNT VALUE_SIZE [--key-prefix P] [--segment-bytes N]\n"
+              << "  streamforge_storage --data-dir DIR gc TOPIC [--dry-run]\n"
               << "  streamforge_storage dump-segment PATH_TO_LOG\n";
 }
 
@@ -111,13 +113,22 @@ int main(int argc, char* argv[]) {
 
     if (command == "create-topic") {
         if (args.size() < 2) {
-            std::cerr << "Usage: create-topic NAME PARTITIONS\n";
+            std::cerr << "Usage: create-topic NAME PARTITIONS [--retention-ms N] [--retention-bytes N]\n";
             return 1;
         }
         std::string name = args[0];
         uint32_t partitions = static_cast<uint32_t>(std::stoul(args[1]));
+        uint64_t ret_ms = 0;
+        uint64_t ret_bytes = 0;
+        for (size_t i = 2; i < args.size(); ++i) {
+            if (args[i] == "--retention-ms" && i + 1 < args.size()) {
+                ret_ms = std::stoull(args[++i]);
+            } else if (args[i] == "--retention-bytes" && i + 1 < args.size()) {
+                ret_bytes = std::stoull(args[++i]);
+            }
+        }
 
-        auto res = manager.create_topic(name, partitions);
+        auto res = manager.create_topic(name, partitions, ret_ms, ret_bytes);
         if (!res.ok()) {
             std::cerr << "Failed to create topic: " << res.status().message() << "\n";
             return 1;
@@ -266,6 +277,34 @@ int main(int argc, char* argv[]) {
             }
         }
         std::cout << "Successfully filled " << count << " records into '" << topic_name << "'.\n";
+        return 0;
+
+    } else if (command == "gc") {
+        if (args.empty()) {
+            std::cerr << "Usage: streamforge_storage --data-dir DIR gc TOPIC [--dry-run]\n";
+            return 1;
+        }
+        std::string topic_name = args[0];
+        bool dry_run = false;
+        for (size_t i = 1; i < args.size(); ++i) {
+            if (args[i] == "--dry-run") {
+                dry_run = true;
+            }
+        }
+
+        auto topic = manager.get_topic(topic_name);
+        if (!topic) {
+            std::cerr << "Error: Topic '" << topic_name << "' not found.\n";
+            return 1;
+        }
+
+        RetentionManager retention_mgr(manager);
+        size_t count = retention_mgr.run_one_pass(dry_run, topic_name);
+        if (dry_run) {
+            std::cout << "GC dry-run completed: " << count << " segment(s) would be deleted for topic '" << topic_name << "'.\n";
+        } else {
+            std::cout << "GC completed: " << count << " segment(s) deleted for topic '" << topic_name << "'.\n";
+        }
         return 0;
 
     } else {

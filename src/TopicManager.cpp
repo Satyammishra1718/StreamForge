@@ -1,9 +1,9 @@
 #include "streamforge/TopicManager.hpp"
 #include "streamforge/Logger.hpp"
+#include "streamforge/FileHandle.hpp"
 #include <fstream>
-#include <sstream>
-#include <cctype>
 #include <algorithm>
+#include <cctype>
 #include <chrono>
 
 namespace streamforge {
@@ -12,33 +12,28 @@ TopicManager::TopicManager(StorageConfig config)
     : m_config(std::move(config)) {}
 
 bool TopicManager::validate_topic_name(const std::string& name, std::string& out_error) {
-    if (name.empty() || name.size() > 64) {
-        out_error = "Topic name must be between 1 and 64 characters";
+    if (name.empty()) {
+        out_error = "Topic name cannot be empty";
         return false;
     }
-    if (name == "." || name == "..") {
-        out_error = "Topic name cannot be '.' or '..'";
-        return false;
-    }
-    if (name.front() == '.' || name.back() == '.') {
-        out_error = "Topic name cannot start or end with '.'";
-        return false;
-    }
-    if (name.find("..") != std::string::npos) {
-        out_error = "Topic name cannot contain '..'";
+    if (name.length() > 249) {
+        out_error = "Topic name exceeds maximum length of 249 characters";
         return false;
     }
 
     for (char c : name) {
-        if (!((c >= 'A' && c <= 'Z') ||
-              (c >= 'a' && c <= 'z') ||
-              (c >= '0' && c <= '9') ||
-              c == '.' || c == '_' || c == '-')) {
+        if (!std::isalnum(static_cast<unsigned char>(c)) && c != '.' && c != '_' && c != '-') {
             out_error = "Topic name contains invalid character: '" + std::string(1, c) + "'";
             return false;
         }
     }
 
+    if (name == "." || name == "..") {
+        out_error = "Topic name cannot be '.' or '..'";
+        return false;
+    }
+
+    // Windows reserved device names
     static const char* reserved_names[] = {
         "CON", "PRN", "AUX", "NUL",
         "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8", "COM9",
@@ -73,10 +68,15 @@ Status TopicManager::save_topic_metadata(const Topic& topic) {
 
     ofs << "partitions=" << topic.num_partitions() << "\n";
     ofs << "created_ms=" << now_ms << "\n";
+    ofs << "retention_ms=" << topic.retention_ms() << "\n";
+    ofs << "retention_bytes=" << topic.retention_bytes() << "\n";
+    ofs.flush();
+    FileHandle::flush_directory(topic.topic_dir());
     return Status::OK();
 }
 
-Status TopicManager::load_topic_metadata(const std::filesystem::path& topic_dir, uint32_t& out_partitions) {
+Status TopicManager::load_topic_metadata(const std::filesystem::path& topic_dir, uint32_t& out_partitions,
+                                         uint64_t& out_retention_ms, uint64_t& out_retention_bytes) {
     std::filesystem::path meta_path = topic_dir / "topic.meta";
     std::ifstream ifs(meta_path);
     if (!ifs.is_open()) {
@@ -84,6 +84,8 @@ Status TopicManager::load_topic_metadata(const std::filesystem::path& topic_dir,
     }
 
     out_partitions = 0;
+    out_retention_ms = m_config.default_retention_ms;
+    out_retention_bytes = m_config.default_retention_bytes;
     std::string line;
     while (std::getline(ifs, line)) {
         auto pos = line.find('=');
@@ -91,7 +93,17 @@ Status TopicManager::load_topic_metadata(const std::filesystem::path& topic_dir,
             std::string key = line.substr(0, pos);
             std::string val = line.substr(pos + 1);
             if (key == "partitions") {
-                out_partitions = static_cast<uint32_t>(std::stoul(val));
+                try {
+                    out_partitions = static_cast<uint32_t>(std::stoul(val));
+                } catch (...) {}
+            } else if (key == "retention_ms") {
+                try {
+                    out_retention_ms = std::stoull(val);
+                } catch (...) {}
+            } else if (key == "retention_bytes") {
+                try {
+                    out_retention_bytes = std::stoull(val);
+                } catch (...) {}
             }
         }
     }
@@ -110,6 +122,7 @@ Status TopicManager::open_and_recover_all() {
     std::filesystem::path base_path(m_config.data_dir);
     if (!std::filesystem::exists(base_path)) {
         std::filesystem::create_directories(base_path);
+        FileHandle::flush_directory(base_path);
         return Status::OK();
     }
 
@@ -123,13 +136,15 @@ Status TopicManager::open_and_recover_all() {
             }
 
             uint32_t partitions = 0;
-            Status st = load_topic_metadata(entry.path(), partitions);
+            uint64_t retention_ms = m_config.default_retention_ms;
+            uint64_t retention_bytes = m_config.default_retention_bytes;
+            Status st = load_topic_metadata(entry.path(), partitions, retention_ms, retention_bytes);
             if (!st.ok()) {
                 Logger::instance().warning("Failed to load metadata for topic " + topic_name + ": " + st.message());
                 continue;
             }
 
-            auto topic = std::make_shared<Topic>(topic_name, partitions, entry.path(), m_config);
+            auto topic = std::make_shared<Topic>(topic_name, partitions, entry.path(), m_config, retention_ms, retention_bytes);
             st = topic->open_and_recover();
             if (!st.ok()) {
                 Logger::instance().error("Failed to recover topic " + topic_name + ": " + st.message());
@@ -137,14 +152,16 @@ Status TopicManager::open_and_recover_all() {
             }
 
             m_topics[topic_name] = topic;
-            Logger::instance().info("Loaded topic '" + topic_name + "' (" + std::to_string(partitions) + " partitions)");
+            Logger::instance().info("Loaded topic '" + topic_name + "' (" + std::to_string(partitions) + " partitions, retention_ms=" +
+                                   std::to_string(retention_ms) + ", retention_bytes=" + std::to_string(retention_bytes) + ")");
         }
     }
 
     return Status::OK();
 }
 
-Result<std::shared_ptr<Topic>> TopicManager::create_topic(const std::string& name, uint32_t partitions) {
+Result<std::shared_ptr<Topic>> TopicManager::create_topic(const std::string& name, uint32_t partitions,
+                                                          uint64_t retention_ms, uint64_t retention_bytes) {
     std::unique_lock<std::shared_mutex> lock(m_mutex);
 
     std::string err;
@@ -160,12 +177,19 @@ Result<std::shared_ptr<Topic>> TopicManager::create_topic(const std::string& nam
         return Status::AlreadyExists("Topic '" + name + "' already exists");
     }
 
+    if (retention_ms == 0) {
+        retention_ms = m_config.default_retention_ms;
+    }
+    if (retention_bytes == 0 && m_config.default_retention_bytes > 0) {
+        retention_bytes = m_config.default_retention_bytes;
+    }
+
     std::filesystem::path topic_dir = std::filesystem::path(m_config.data_dir) / name;
     if (std::filesystem::exists(topic_dir / "topic.meta")) {
         return Status::AlreadyExists("Topic metadata already exists on disk for '" + name + "'");
     }
 
-    auto topic = std::make_shared<Topic>(name, partitions, topic_dir, m_config);
+    auto topic = std::make_shared<Topic>(name, partitions, topic_dir, m_config, retention_ms, retention_bytes);
     Status st = topic->open_and_recover();
     if (!st.ok()) {
         return st;
@@ -176,8 +200,12 @@ Result<std::shared_ptr<Topic>> TopicManager::create_topic(const std::string& nam
         return st;
     }
 
+    FileHandle::flush_directory(topic_dir);
+    FileHandle::flush_directory(std::filesystem::path(m_config.data_dir));
+
     m_topics[name] = topic;
-    Logger::instance().info("Created topic '" + name + "' with " + std::to_string(partitions) + " partitions");
+    Logger::instance().info("Created topic '" + name + "' with " + std::to_string(partitions) + " partitions (retention_ms=" +
+                           std::to_string(retention_ms) + ", retention_bytes=" + std::to_string(retention_bytes) + ")");
     return topic;
 }
 

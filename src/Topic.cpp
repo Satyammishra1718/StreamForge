@@ -2,10 +2,13 @@
 
 namespace streamforge {
 
-Topic::Topic(std::string name, uint32_t num_partitions, std::filesystem::path topic_dir, StorageConfig config)
+Topic::Topic(std::string name, uint32_t num_partitions, std::filesystem::path topic_dir, StorageConfig config,
+             uint64_t retention_ms, uint64_t retention_bytes)
     : m_name(std::move(name)),
       m_topic_dir(std::move(topic_dir)),
-      m_config(std::move(config)) {
+      m_config(std::move(config)),
+      m_retention_ms(retention_ms),
+      m_retention_bytes(retention_bytes) {
     m_partitions.reserve(num_partitions);
     for (uint32_t i = 0; i < num_partitions; ++i) {
         std::filesystem::path part_dir = m_topic_dir / std::to_string(i);
@@ -36,6 +39,13 @@ Result<uint64_t> Topic::append_to(uint32_t partition_id, const std::vector<uint8
         return Status::InvalidArgument("Invalid partition ID: " + std::to_string(partition_id));
     }
     return m_partitions[partition_id]->append(key, value);
+}
+
+Result<uint64_t> Topic::append_with_timestamp(uint32_t partition_id, const std::vector<uint8_t>& key, const std::vector<uint8_t>& value, int64_t timestamp_ms) {
+    if (partition_id >= m_partitions.size()) {
+        return Status::InvalidArgument("Invalid partition ID: " + std::to_string(partition_id));
+    }
+    return m_partitions[partition_id]->append_with_timestamp(key, value, timestamp_ms);
 }
 
 Result<uint64_t> Topic::produce_batch(int32_t partition,

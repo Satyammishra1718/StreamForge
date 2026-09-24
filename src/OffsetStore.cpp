@@ -1,6 +1,7 @@
 #include "streamforge/OffsetStore.hpp"
 #include "streamforge/FrameCodec.hpp"
 #include "streamforge/Logger.hpp"
+#include "streamforge/CrashPoint.hpp"
 #include <sstream>
 
 namespace streamforge {
@@ -128,10 +129,16 @@ Status OffsetStore::commit(const std::string& group_id, const std::vector<Offset
         batch.push_back({std::move(key_bytes), std::move(val_bytes)});
     }
 
+    // Crash point: mid-write of an offset commit
+    CrashPoint::maybe_die("mid_write_offset_commit");
+
     auto append_res = m_offsets_partition->append_batch(batch);
     if (!append_res.ok()) {
         return append_res.status();
     }
+
+    // Always fsync offset commits to disk regardless of sync_on_append
+    m_offsets_partition->flush();
 
     // Update in-memory cache
     for (const auto& item : items) {

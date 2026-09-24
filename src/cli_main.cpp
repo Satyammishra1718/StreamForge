@@ -524,9 +524,30 @@ int main(int argc, char* argv[]) {
                 return 1;
             }
             std::string topic_name = args[0];
-            uint16_t num_partitions = (args.size() > 1) ? static_cast<uint16_t>(std::atoi(args[1].c_str())) : 1;
+            uint16_t num_partitions = 1;
+            uint64_t retention_ms = 0;
+            uint64_t retention_bytes = 0;
+            bool has_retention = false;
 
-            CreateTopicRequest req_msg{ topic_name, num_partitions };
+            for (size_t i = 1; i < args.size(); ++i) {
+                if (args[i] == "--retention-ms" && i + 1 < args.size()) {
+                    retention_ms = std::stoull(args[++i]);
+                    has_retention = true;
+                } else if (args[i] == "--retention-bytes" && i + 1 < args.size()) {
+                    retention_bytes = std::stoull(args[++i]);
+                    has_retention = true;
+                } else if (args[i].rfind("--", 0) != 0 && num_partitions == 1) {
+                    num_partitions = static_cast<uint16_t>(std::atoi(args[i].c_str()));
+                }
+            }
+
+            CreateTopicRequest req_msg;
+            req_msg.topic = topic_name;
+            req_msg.partitions = num_partitions;
+            req_msg.retention_ms = retention_ms;
+            req_msg.retention_bytes = retention_bytes;
+            req_msg.has_retention = has_retention;
+
             BodyWriter writer;
             req_msg.encode(writer);
             std::vector<uint8_t> body = writer.take_buffer();
@@ -743,7 +764,7 @@ int main(int argc, char* argv[]) {
             }
             return 0;
 
-        } else if (command == "describe") {
+        } else if (command == "describe" || command == "describe-topic") {
             if (args.empty()) {
                 std::cerr << "Usage: streamforge_cli describe TOPIC\n";
                 return 1;
@@ -766,10 +787,18 @@ int main(int argc, char* argv[]) {
                 return 1;
             }
 
-            std::cout << "Topic '" << resp_msg.name << "' (" << resp_msg.partitions << " partitions):\n";
+            std::cout << "Topic '" << resp_msg.name << "' (" << resp_msg.partitions << " partitions";
+            if (resp_msg.retention_ms > 0 || resp_msg.retention_bytes > 0) {
+                std::cout << ", retention_ms=" << resp_msg.retention_ms << ", retention_bytes=" << resp_msg.retention_bytes;
+            }
+            if (resp_msg.degraded) {
+                std::cout << ", status=DEGRADED";
+            }
+            std::cout << "):\n";
             for (uint16_t p = 0; p < resp_msg.partitions; ++p) {
                 std::cout << "  Partition " << p << ": earliest=" << resp_msg.partition_offsets[p].earliest
-                          << ", next_offset=" << resp_msg.partition_offsets[p].next_offset << "\n";
+                          << ", next_offset=" << resp_msg.partition_offsets[p].next_offset
+                          << ", segments=" << resp_msg.partition_offsets[p].segment_count << "\n";
             }
             return 0;
 

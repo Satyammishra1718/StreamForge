@@ -105,12 +105,18 @@ public:
         return SetEndOfFile(m_handle) != FALSE;
     }
 
+    // Windows Delete-While-Open Behavior:
+    // On Windows, opening files with FILE_SHARE_DELETE is mandatory to allow safe deletion
+    // while open handles remain in use. When a file is removed via std::filesystem::remove
+    // (or DeleteFileW), NTFS marks the file for deletion and unlinks its directory entry.
+    // Any existing open handles (such as an in-flight FETCH reader) continue to read
+    // from the valid file data until closed. New open attempts immediately fail with NotFound.
     static FileHandle open_read_write(const std::filesystem::path& path, bool create_if_missing = true) {
         DWORD creation = create_if_missing ? OPEN_ALWAYS : OPEN_EXISTING;
         HANDLE h = CreateFileW(
             path.wstring().c_str(),
             GENERIC_READ | GENERIC_WRITE,
-            FILE_SHARE_READ | FILE_SHARE_WRITE,
+            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
             nullptr,
             creation,
             FILE_ATTRIBUTE_NORMAL,
@@ -123,13 +129,43 @@ public:
         HANDLE h = CreateFileW(
             path.wstring().c_str(),
             GENERIC_READ,
-            FILE_SHARE_READ | FILE_SHARE_WRITE,
+            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
             nullptr,
             OPEN_EXISTING,
             FILE_ATTRIBUTE_NORMAL,
             nullptr
         );
         return FileHandle(h);
+    }
+
+    // Flushes directory metadata on Windows/NTFS using FILE_FLAG_BACKUP_SEMANTICS
+    static bool flush_directory(const std::filesystem::path& dir) {
+        HANDLE h = CreateFileW(
+            dir.wstring().c_str(),
+            FILE_LIST_DIRECTORY | GENERIC_WRITE,
+            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+            nullptr,
+            OPEN_EXISTING,
+            FILE_FLAG_BACKUP_SEMANTICS,
+            nullptr
+        );
+        if (h == INVALID_HANDLE_VALUE) {
+            h = CreateFileW(
+                dir.wstring().c_str(),
+                GENERIC_READ,
+                FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                nullptr,
+                OPEN_EXISTING,
+                FILE_FLAG_BACKUP_SEMANTICS,
+                nullptr
+            );
+        }
+        if (h != INVALID_HANDLE_VALUE) {
+            FlushFileBuffers(h);
+            CloseHandle(h);
+            return true;
+        }
+        return false;
     }
 
 private:

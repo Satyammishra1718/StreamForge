@@ -9,6 +9,7 @@
 #include "streamforge/TopicManager.hpp"
 #include "streamforge/OffsetStore.hpp"
 #include "streamforge/GroupCoordinator.hpp"
+#include "streamforge/RetentionManager.hpp"
 #include "streamforge/Logger.hpp"
 #include <windows.h>
 
@@ -47,6 +48,10 @@ int main(int argc, char* argv[]) {
     uint32_t group_min_session_ms = 1000;
     uint32_t group_max_session_ms = 60000;
     uint32_t reaper_interval_ms = 500;
+    uint64_t default_retention_ms = streamforge::DEFAULT_RETENTION_MS;
+    uint64_t default_retention_bytes = streamforge::DEFAULT_RETENTION_BYTES;
+    uint64_t retention_check_interval_ms = streamforge::DEFAULT_RETENTION_CHECK_INTERVAL_MS;
+    std::string startup_scan = "quick";
 
     for (int i = 1; i < argc; ++i) {
         std::string arg = argv[i];
@@ -77,6 +82,14 @@ int main(int argc, char* argv[]) {
             group_max_session_ms = static_cast<uint32_t>(std::stoul(argv[++i]));
         } else if (arg == "--reaper-interval-ms" && i + 1 < argc) {
             reaper_interval_ms = static_cast<uint32_t>(std::stoul(argv[++i]));
+        } else if (arg == "--default-retention-ms" && i + 1 < argc) {
+            default_retention_ms = std::stoull(argv[++i]);
+        } else if (arg == "--default-retention-bytes" && i + 1 < argc) {
+            default_retention_bytes = std::stoull(argv[++i]);
+        } else if (arg == "--retention-check-interval-ms" && i + 1 < argc) {
+            retention_check_interval_ms = std::stoull(argv[++i]);
+        } else if (arg == "--startup-scan" && i + 1 < argc) {
+            startup_scan = argv[++i];
         } else if (arg.rfind("--", 0) != 0) {
             port = static_cast<uint16_t>(std::atoi(argv[i]));
         }
@@ -102,6 +115,10 @@ int main(int argc, char* argv[]) {
         storage_cfg.data_dir = data_dir;
         storage_cfg.segment_max_bytes = segment_bytes;
         storage_cfg.sync_on_append = sync_on_append;
+        storage_cfg.default_retention_ms = default_retention_ms;
+        storage_cfg.default_retention_bytes = default_retention_bytes;
+        storage_cfg.retention_check_interval_ms = retention_check_interval_ms;
+        storage_cfg.startup_scan = startup_scan;
 
         streamforge::TopicManager topic_mgr(storage_cfg);
         streamforge::Status st = topic_mgr.open_and_recover_all();
@@ -123,6 +140,10 @@ int main(int argc, char* argv[]) {
         coord_cfg.min_session_timeout_ms = group_min_session_ms;
         coord_cfg.max_session_timeout_ms = group_max_session_ms;
         streamforge::GroupCoordinator coordinator(topic_mgr, offset_store, coord_cfg);
+
+        // Start RetentionManager background thread
+        streamforge::RetentionManager retention_mgr(topic_mgr, retention_check_interval_ms);
+        retention_mgr.start();
 
         auto topics = topic_mgr.list_topics();
         streamforge::Logger::instance().info("Storage engine initialized (" + std::to_string(topics.size()) + " topics loaded from " + data_dir + ")");
@@ -152,6 +173,7 @@ int main(int argc, char* argv[]) {
         g_server_instance = &server;
         server.start();
         server.wait_until_stopped();
+        retention_mgr.stop();
         g_server_instance = nullptr;
     } catch (const std::exception& ex) {
         streamforge::Logger::instance().error(std::string("Fatal server error: ") + ex.what());

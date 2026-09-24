@@ -1,5 +1,6 @@
 #include "streamforge/Partition.hpp"
 #include "streamforge/Logger.hpp"
+#include "streamforge/CrashPoint.hpp"
 #include <algorithm>
 #include <chrono>
 #include <fstream>
@@ -12,7 +13,7 @@ Partition::Partition(uint32_t partition_id, std::filesystem::path partition_dir,
       m_config(std::move(config)) {}
 
 Status Partition::open_and_recover() {
-    std::lock_guard<std::mutex> lock(m_mutex);
+    std::unique_lock<std::shared_mutex> lock(m_mutex);
     std::filesystem::create_directories(m_partition_dir);
 
     std::vector<uint64_t> base_offsets;
@@ -35,6 +36,12 @@ Status Partition::open_and_recover() {
         base_offsets.push_back(0);
     }
 
+    bool full_scan = (m_config.startup_scan == "full");
+    uint64_t total_bytes_scanned = 0;
+    uint64_t total_records_validated = 0;
+    uint64_t total_corruptions_found = 0;
+    auto scan_start_time = std::chrono::steady_clock::now();
+
     for (size_t i = 0; i < base_offsets.size(); ++i) {
         uint64_t base_off = base_offsets[i];
         auto seg = std::make_unique<LogSegment>(base_off, m_partition_dir, m_config.index_interval_bytes);
@@ -44,15 +51,65 @@ Status Partition::open_and_recover() {
         }
 
         if (i < base_offsets.size() - 1) {
-            seg->seal();
+            // Sealed segment
+            if (!seg->has_sealed_marker()) {
+                // Edge case: sealed segment missing its marker
+                Logger::instance().warning("Sealed segment " + seg->log_path().string() +
+                                          " missing .sealed sidecar. Fully recovering and creating marker.");
+                uint64_t dummy_next = 0;
+                st = seg->recover_and_rebuild_index(dummy_next);
+                if (!st.ok()) {
+                    return st;
+                }
+                seg->seal();
+                st = seg->write_sealed_marker();
+                if (!st.ok()) {
+                    Logger::instance().warning("Failed to write recovered sealed marker: " + st.message());
+                }
+                seg->flush();
+                FileHandle::flush_directory(m_partition_dir);
+            } else {
+                // Has .sealed marker
+                if (full_scan) {
+                    uint64_t seg_bytes = 0, seg_records = 0, seg_corrupt = 0;
+                    st = seg->verify_and_rebuild_full(seg_bytes, seg_records, seg_corrupt);
+                    total_bytes_scanned += seg_bytes;
+                    total_records_validated += seg_records;
+                    total_corruptions_found += seg_corrupt;
+                    if (seg_corrupt > 0) {
+                        m_is_degraded = true;
+                    }
+                } else {
+                    // Quick scan: spot-check first and last record and index positions
+                    bool valid = true;
+                    st = seg->verify_quick(valid);
+                    if (!valid) {
+                        Logger::instance().warning("Spot-check verification failed for sealed segment " +
+                                                  seg->log_path().string() + ". Marking partition degraded.");
+                        m_is_degraded = true;
+                    }
+                }
+                seg->seal();
+            }
         } else {
-            // Active segment: recover torn tail if any and rebuild index
+            // Active segment: always recover torn tail and rebuild index
             st = seg->recover_and_rebuild_index(m_next_offset);
             if (!st.ok()) {
                 return st;
             }
         }
         m_segments.push_back(std::move(seg));
+    }
+
+    if (full_scan) {
+        auto scan_end_time = std::chrono::steady_clock::now();
+        auto elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(scan_end_time - scan_start_time).count();
+        Logger::instance().info("[Startup Scan: FULL] Partition " + std::to_string(m_partition_id) +
+                               " scanned " + std::to_string(m_segments.size()) + " segments, " +
+                               std::to_string(total_bytes_scanned) + " bytes, " +
+                               std::to_string(total_records_validated) + " records, " +
+                               std::to_string(total_corruptions_found) + " corruptions in " +
+                               std::to_string(elapsed_ms) + " ms.");
     }
 
     // Set earliest & next offsets
@@ -73,8 +130,20 @@ LogSegment* Partition::active_segment_unlocked() {
 
 Status Partition::roll_segment_unlocked() {
     if (!m_segments.empty()) {
-        m_segments.back()->seal();
+        LogSegment* old_seg = m_segments.back().get();
+        old_seg->seal();
+
+        // Crash injection point: between sealing and writing .sealed sidecar
+        CrashPoint::maybe_die("between_seal_and_sealed");
+
+        Status st = old_seg->write_sealed_marker();
+        if (!st.ok()) {
+            return st;
+        }
+        old_seg->flush();
+        FileHandle::flush_directory(m_partition_dir);
     }
+
     uint64_t new_base_offset = m_next_offset;
     auto new_seg = std::make_unique<LogSegment>(new_base_offset, m_partition_dir, m_config.index_interval_bytes);
     Status st = new_seg->open();
@@ -82,11 +151,19 @@ Status Partition::roll_segment_unlocked() {
         return st;
     }
     m_segments.push_back(std::move(new_seg));
+    FileHandle::flush_directory(m_partition_dir);
     return Status::OK();
 }
 
 Result<uint64_t> Partition::append(const std::vector<uint8_t>& key, const std::vector<uint8_t>& value) {
-    std::lock_guard<std::mutex> lock(m_mutex);
+    int64_t now_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::system_clock::now().time_since_epoch()
+    ).count();
+    return append_with_timestamp(key, value, now_ms);
+}
+
+Result<uint64_t> Partition::append_with_timestamp(const std::vector<uint8_t>& key, const std::vector<uint8_t>& value, int64_t timestamp_ms) {
+    std::unique_lock<std::shared_mutex> lock(m_mutex);
 
     uint32_t record_size = 4 + 24 + static_cast<uint32_t>(key.size() + value.size());
     if (record_size > MAX_RECORD_SIZE) {
@@ -106,17 +183,13 @@ Result<uint64_t> Partition::append(const std::vector<uint8_t>& key, const std::v
         active = active_segment_unlocked();
     }
 
-    int64_t now_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
-        std::chrono::system_clock::now().time_since_epoch()
-    ).count();
-
     Record record;
     record.offset = m_next_offset;
-    record.timestamp_ms = now_ms;
+    record.timestamp_ms = timestamp_ms;
     record.key = key;
     record.value = value;
 
-    Status st = active->append(record, m_config.sync_on_append);
+    Status st = active->append_with_timestamp(record, timestamp_ms, m_config.sync_on_append);
     if (!st.ok()) {
         return st;
     }
@@ -131,7 +204,7 @@ Result<uint64_t> Partition::append_batch(const std::vector<std::pair<std::vector
         return Status::InvalidArgument("Cannot append empty batch");
     }
 
-    std::lock_guard<std::mutex> lock(m_mutex);
+    std::unique_lock<std::shared_mutex> lock(m_mutex);
 
     // Validate size of every record in batch
     for (const auto& item : batch) {
@@ -168,7 +241,7 @@ Result<uint64_t> Partition::append_batch(const std::vector<std::pair<std::vector
         record.key = item.first;
         record.value = item.second;
 
-        // Pass false for sync_on_append per-record, we will sync once after batch if needed
+        // Pass false for sync_on_append per-record, sync once after batch
         Status st = active->append(record, false);
         if (!st.ok()) {
             return st;
@@ -187,7 +260,7 @@ Result<uint64_t> Partition::append_batch(const std::vector<std::pair<std::vector
 }
 
 ReadResult Partition::read(uint64_t start_offset, size_t max_messages, size_t max_bytes) {
-    std::lock_guard<std::mutex> lock(m_mutex);
+    std::shared_lock<std::shared_mutex> lock(m_mutex);
     ReadResult res;
 
     if (start_offset == m_next_offset) {
@@ -264,24 +337,123 @@ uint64_t Partition::next_offset() const {
 }
 
 void Partition::flush() {
-    std::lock_guard<std::mutex> lock(m_mutex);
+    std::shared_lock<std::shared_mutex> lock(m_mutex);
     for (auto& seg : m_segments) {
         seg->flush();
     }
 }
 
 size_t Partition::segment_count() const {
-    std::lock_guard<std::mutex> lock(m_mutex);
+    std::shared_lock<std::shared_mutex> lock(m_mutex);
     return m_segments.size();
 }
 
 uint64_t Partition::total_bytes() const {
-    std::lock_guard<std::mutex> lock(m_mutex);
+    std::shared_lock<std::shared_mutex> lock(m_mutex);
     uint64_t total = 0;
     for (const auto& seg : m_segments) {
         total += seg->log_size_bytes();
     }
     return total;
+}
+
+Status Partition::scan_and_delete_segments(uint64_t retention_ms,
+                                          uint64_t retention_bytes,
+                                          bool dry_run,
+                                          std::vector<DeletionCandidate>& out_deleted) {
+    std::unique_lock<std::shared_mutex> lock(m_mutex);
+
+    // Deletion unit is a SEALED SEGMENT, never a partial segment, and NEVER the active segment.
+    // If we have <= 1 segment, active segment is the only segment and cannot be deleted.
+    if (m_segments.size() <= 1) {
+        return Status::OK();
+    }
+
+    int64_t now_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::system_clock::now().time_since_epoch()
+    ).count();
+
+    size_t deletable_by_age = 0;
+    if (retention_ms > 0) {
+        for (size_t i = 0; i < m_segments.size() - 1; ++i) {
+            int64_t seg_max_ts = m_segments[i]->max_timestamp_ms();
+            if (seg_max_ts > 0 && (now_ms - seg_max_ts) > static_cast<int64_t>(retention_ms)) {
+                deletable_by_age = i + 1;
+            } else {
+                break; // Prefix condition: stop at first non-expired segment
+            }
+        }
+    }
+
+    size_t deletable_by_size = 0;
+    if (retention_bytes > 0) {
+        uint64_t current_total = 0;
+        for (const auto& seg : m_segments) {
+            current_total += seg->log_size_bytes();
+        }
+
+        if (current_total > retention_bytes) {
+            for (size_t i = 0; i < m_segments.size() - 1; ++i) {
+                if (current_total > retention_bytes) {
+                    current_total -= m_segments[i]->log_size_bytes();
+                    deletable_by_size = i + 1;
+                } else {
+                    break;
+                }
+            }
+        }
+    }
+
+    size_t deletable_count = std::max(deletable_by_age, deletable_by_size);
+    if (deletable_count >= m_segments.size()) {
+        deletable_count = m_segments.size() - 1; // Strict invariant: never delete active segment!
+    }
+
+    if (deletable_count == 0) {
+        return Status::OK();
+    }
+
+    out_deleted.clear();
+    for (size_t i = 0; i < deletable_count; ++i) {
+        LogSegment* seg = m_segments[i].get();
+        DeletionCandidate cand;
+        cand.base_offset = seg->base_offset();
+        cand.records = seg->record_count();
+        cand.bytes = seg->log_size_bytes();
+        cand.log_path = seg->log_path();
+        cand.index_path = seg->index_path();
+        cand.sealed_path = seg->sealed_path();
+        out_deleted.push_back(cand);
+    }
+
+    if (dry_run) {
+        return Status::OK();
+    }
+
+    // Move deletable segments out under the exclusive lock
+    std::vector<std::unique_ptr<LogSegment>> to_delete;
+    to_delete.reserve(deletable_count);
+    for (size_t i = 0; i < deletable_count; ++i) {
+        to_delete.push_back(std::move(m_segments[i]));
+    }
+    m_segments.erase(m_segments.begin(), m_segments.begin() + deletable_count);
+
+    // Release lock BEFORE file deletion!
+    lock.unlock();
+
+    // Close open handles by clearing segment vector
+    to_delete.clear();
+
+    // Delete files outside the lock
+    for (const auto& cand : out_deleted) {
+        std::error_code ec;
+        std::filesystem::remove(cand.log_path, ec);
+        std::filesystem::remove(cand.index_path, ec);
+        std::filesystem::remove(cand.sealed_path, ec);
+    }
+    FileHandle::flush_directory(m_partition_dir);
+
+    return Status::OK();
 }
 
 } // namespace streamforge

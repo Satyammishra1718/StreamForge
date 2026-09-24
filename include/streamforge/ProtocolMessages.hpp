@@ -12,16 +12,28 @@ namespace streamforge {
 struct CreateTopicRequest {
     std::string topic;
     uint16_t partitions{0};
+    uint64_t retention_ms{0};
+    uint64_t retention_bytes{0};
+    bool has_retention{false};
 
     bool decode(BodyReader& reader) {
-        return reader.read_string(topic) &&
-               reader.read_u16(partitions) &&
-               reader.require_empty();
+        if (!reader.read_string(topic)) return false;
+        if (!reader.read_u16(partitions)) return false;
+        if (reader.remaining() > 0) {
+            if (!reader.read_u64(retention_ms)) return false;
+            if (!reader.read_u64(retention_bytes)) return false;
+            has_retention = true;
+        }
+        return reader.require_empty();
     }
 
     void encode(BodyWriter& writer) const {
         writer.write_string(topic);
         writer.write_u16(partitions);
+        if (has_retention) {
+            writer.write_u64(retention_ms);
+            writer.write_u64(retention_bytes);
+        }
     }
 };
 
@@ -211,12 +223,16 @@ struct ListTopicsResponse {
 struct PartitionOffsetWire {
     uint64_t earliest{0};
     uint64_t next_offset{0};
+    uint32_t segment_count{1};
 };
 
 struct DescribeTopicResponse {
     std::string name;
     uint16_t partitions{0};
     std::vector<PartitionOffsetWire> partition_offsets;
+    uint64_t retention_ms{0};
+    uint64_t retention_bytes{0};
+    uint8_t degraded{0};
 
     void encode(BodyWriter& writer) const {
         writer.write_string(name);
@@ -224,16 +240,31 @@ struct DescribeTopicResponse {
         for (const auto& po : partition_offsets) {
             writer.write_u64(po.earliest);
             writer.write_u64(po.next_offset);
+            writer.write_u32(po.segment_count);
         }
+        writer.write_u64(retention_ms);
+        writer.write_u64(retention_bytes);
+        writer.write_u8(degraded);
     }
 
     bool decode(BodyReader& reader) {
         if (!reader.read_string(name)) return false;
         if (!reader.read_u16(partitions)) return false;
         partition_offsets.resize(partitions);
+        bool extended = (reader.remaining() >= static_cast<size_t>(partitions) * 20);
         for (uint16_t i = 0; i < partitions; ++i) {
             if (!reader.read_u64(partition_offsets[i].earliest)) return false;
             if (!reader.read_u64(partition_offsets[i].next_offset)) return false;
+            if (extended) {
+                if (!reader.read_u32(partition_offsets[i].segment_count)) return false;
+            } else {
+                partition_offsets[i].segment_count = 1;
+            }
+        }
+        if (extended && reader.remaining() >= 17) {
+            if (!reader.read_u64(retention_ms)) return false;
+            if (!reader.read_u64(retention_bytes)) return false;
+            if (!reader.read_u8(degraded)) return false;
         }
         return reader.require_empty();
     }

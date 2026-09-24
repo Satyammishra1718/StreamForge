@@ -17,7 +17,7 @@ namespace streamforge {
 // Lock Order Hierarchy:
 // 1. TopicManager::m_mutex (shared_mutex: shared lock for lookups/list, exclusive lock for create/recover)
 // 2. Topic::m_mutex (guards partition array access)
-// 3. Partition::m_mutex (guards active segment rolls, appends, positional reads, and flushing)
+// 3. Partition::m_mutex (shared_mutex: shared lock for reads/status, exclusive lock for append/roll/delete-prefix)
 
 class TopicManager {
 public:
@@ -29,7 +29,8 @@ public:
 
     Status open_and_recover_all();
 
-    Result<std::shared_ptr<Topic>> create_topic(const std::string& name, uint32_t partitions);
+    Result<std::shared_ptr<Topic>> create_topic(const std::string& name, uint32_t partitions,
+                                                uint64_t retention_ms = 0, uint64_t retention_bytes = 0);
     std::shared_ptr<Topic> get_topic(const std::string& name) const;
     std::vector<std::shared_ptr<Topic>> list_topics() const;
 
@@ -39,7 +40,8 @@ public:
 
 private:
     Status save_topic_metadata(const Topic& topic);
-    Status load_topic_metadata(const std::filesystem::path& topic_dir, uint32_t& out_partitions);
+    Status load_topic_metadata(const std::filesystem::path& topic_dir, uint32_t& out_partitions,
+                               uint64_t& out_retention_ms, uint64_t& out_retention_bytes);
 
     StorageConfig m_config;
     mutable std::shared_mutex m_mutex;

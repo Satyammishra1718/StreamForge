@@ -14,6 +14,12 @@ endif()
 
 include_directories(include)
 
+option(STREAMFORGE_CRASH_TESTING "Enable simulated crash testing hooks" OFF)
+
+if(STREAMFORGE_CRASH_TESTING)
+    add_compile_definitions(STREAMFORGE_CRASH_TESTING)
+endif()
+
 # Core library containing shared Winsock, networking, protocol, storage, and coordinator code
 add_library(streamforge_core STATIC
     src/WinsockRuntime.cpp
@@ -37,6 +43,7 @@ add_library(streamforge_core STATIC
     src/Assignor.cpp
     src/OffsetStore.cpp
     src/GroupCoordinator.cpp
+    src/RetentionManager.cpp
 )
 
 target_include_directories(streamforge_core PUBLIC include)
@@ -69,3 +76,9 @@ target_link_libraries(streamforge_net_tests PRIVATE streamforge_core)
 # Group Coordinator Unit Tests executable
 add_executable(streamforge_group_tests tests/group_tests.cpp)
 target_link_libraries(streamforge_group_tests PRIVATE streamforge_core)
+
+# Simulated Crash Injection Tests executable (only built when STREAMFORGE_CRASH_TESTING=ON)
+if(STREAMFORGE_CRASH_TESTING)
+    add_executable(streamforge_crash_tests tests/crash_tests.cpp)
+    target_link_libraries(streamforge_crash_tests PRIVATE streamforge_core)
+endif()
