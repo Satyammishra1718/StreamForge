@@ -18,7 +18,7 @@ constexpr size_t MAX_CONCURRENT_CONNECTIONS = 256;
 
 class TcpServer {
 public:
-    TcpServer(std::string host, uint16_t port);
+    TcpServer(std::string host, uint16_t port, MessageHandler handler);
     ~TcpServer();
 
     TcpServer(const TcpServer&) = delete;

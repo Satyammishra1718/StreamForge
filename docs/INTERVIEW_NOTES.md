@@ -119,3 +119,59 @@ Every client request processed by StreamForge follows a clear 6-step lifecycle:
   - `TopicManager` scans the active segment from byte 0 to the end of file.
   - It validates the header length, payload bounds, and CRC32 checksum for every record.
   - When it encounters a torn/corrupted tail record, it truncates the `.log` file back to the end of the last fully valid record using `SetEndOfFile()`, logs a `WARNING` specifying how many partial bytes were truncated, and sets `next_offset` to continue cleanly from the last valid record. Valid records are never lost.
+
+---
+
+## Milestone 3: Produce and Fetch Messages Over TCP
+
+### 1. Request Lifecycle Walkthroughs
+
+#### A. Producing One Record End-to-End
+1. **Client Framing**: The client constructs a `ProduceRequest` containing `{ topic = "orders", partition = -1, records = [{ key = "user_10", val = "pay" }] }`. The payload is serialized using `BodyWriter` into a binary frame prefixed with `[u32 length][u8 type=0x11][u32 request_id]` in Big-Endian.
+2. **Network Reception**: The server's worker thread reads the 4-byte frame length via `Socket::recv_exact()`, verifies `length <= 1 MiB`, and receives the full payload.
+3. **Body & Bounds Validation**: `BodyReader` parses the request. It validates that string lengths and byte payload lengths fit within the buffer boundaries before reading.
+4. **Partition Routing & Atomic Append**:
+   - `TopicManager` looks up topic `"orders"`.
+   - Because `partition == -1`, `Topic::produce_batch()` inspects `records[0].key` (`"user_10"`). Since the key is non-empty, it invokes `KeyHashPartitioner::partition("user_10", 3)` which deterministically returns target partition (e.g., Partition 1).
+   - `Partition::append_batch()` acquires `Partition::m_mutex`, assigns contiguous monotonically increasing offset $O$, serializes records, appends them to the active `.log` segment (rolling segments if `segment_max_bytes` is exceeded), and flushes dirty pages to disk if `sync_on_append == true`.
+5. **Response Transmission**: The server returns a `PRODUCE_OK` (`0x91`) response carrying `{ partition = 1, base_offset = O, count = 1 }`.
+
+#### B. Fetching Messages Starting from Offset 500 End-to-End
+1. **Client Request**: Client sends `FETCH` (`0x12`) carrying `{ topic = "orders", partition = 1, start_offset = 500, max_bytes = 1048576, max_messages = 50 }`.
+2. **Bounds & Offset Range Checks**: Server validates topic existence and partition bounds, then checks `start_offset` against Partition 1's `earliest_offset` and `high_watermark` (`next_offset`):
+   - If `start_offset == high_watermark`: returns `FETCH_OK` (`0x92`) with `record_count = 0` (caught up).
+   - If `start_offset > high_watermark` or `< earliest`: returns `OFFSET_OUT_OF_RANGE` (`0x08`).
+3. **Sparse Index Lookup & Sequential Disk Read**:
+   - `Partition::read()` locates the segment containing offset 500 via binary search on `base_offset`.
+   - Inside that segment's sparse `OffsetIndex`, it binary searches for the nearest index entry `<= 500`, yielding byte position $P$.
+   - Using `ReadFile()` with `OVERLAPPED` offsets (positional read without moving file pointers), it reads records starting at $P$, skips records with `offset < 500`, and accumulates matching records until `max_messages` or `max_bytes` is met.
+4. **Response Transmission**: Returns `FETCH_OK` carrying `next_offset` (offset of last record + 1), `high_watermark`, `earliest_offset`, and the array of record payloads.
+
+---
+
+### 2. Deep-Dive Network & Protocol Questions & Answers
+
+#### Q1: What does an acknowledged produce guarantee, and what does it not guarantee with `sync_on_append = false`?
+- **With `sync_on_append = true`**: An acknowledged `PRODUCE_OK` response guarantees that the batch has been written to disk AND flushed to physical storage media via Win32 `FlushFileBuffers()`. Even on sudden hardware power failure, the records remain intact.
+- **With `sync_on_append = false`**: An acknowledged `PRODUCE_OK` response guarantees that the batch was written to the OS kernel page cache. If the process crashes or is forcefully terminated (`Stop-Process -Force`), the OS will complete dirty page writes and data is saved. However, if sudden physical hardware power failure occurs before the OS flushes dirty pages to disk, un-flushed tail records may be lost.
+
+#### Q2: Why is validating every length field in the body a security and stability requirement?
+- **Buffer Overflow & OOB Memory Reads**: In binary TCP protocols, untrusted clients can send malicious length prefixes (e.g. declaring a string length of $2^{32}-1$ or claiming a payload size larger than the remaining frame).
+- **Security Defense**: Reading length fields without validating `length <= remaining_bytes` leads to process memory corruption, heap out-of-bounds reads, denial-of-service crashes, or potential remote code execution. `BodyReader` enforces bounds checks before every read operation, returning `MALFORMED_BODY` (`0x0A`) without crashing or reading out of bounds.
+
+#### Q3: Why does FETCH return `next_offset` and `high_watermark`, and how does a consumer use them?
+- **`next_offset`**: Tells the consumer the exact start offset to request in its next `FETCH` call, simplifying client loop logic regardless of how many records were returned.
+- **`high_watermark`**: Represents the partition's current `next_offset` (end of log). The consumer compares `next_offset` against `high_watermark` to calculate consumer lag (`high_watermark - next_offset`).
+
+#### Q4: Why is fetching at `high_watermark` an OK empty result and not an error?
+- **Normal Caught-Up State**: Reaching `start_offset == high_watermark` means the consumer has successfully processed all available messages in the partition. Returning `FETCH_OK` with 0 records is a valid "caught-up" status allowing polling consumers (`consume --follow`) to sleep briefly and retry without throwing exception errors.
+
+#### Q5: What does batching in PRODUCE buy us, and what does it cost?
+- **Benefits**:
+  - **Amortized I/O & Network Overhead**: Reduces TCP frame overhead (1 header for $N$ records) and amortizes Win32 system call context switches and disk flush costs across all records in the batch.
+  - **Atomicity**: All records in a batch are assigned contiguous offsets atomically on disk.
+- **Trade-off / Cost**: Increased latency per message for producers waiting to assemble a full batch, and larger per-frame memory buffers.
+
+#### Q6: Why does ordering hold within a partition but not across partitions?
+- **Partition-Level Guarantee**: A partition is backed by a single append-only log protected by a partition mutex. Offsets are strictly sequential ($0, 1, 2, \dots$), ensuring total ordering for records within that partition.
+- **Cross-Partition Non-Guarantee**: Different partitions run independently with separate offset sequences. Concurrent writes to Partition 0 and Partition 1 have no shared sequence order or global timestamp synchronization.

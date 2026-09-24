@@ -31,12 +31,16 @@ std::string Logger::get_timestamp() {
 
 void Logger::log(LogLevel level, const std::string& message) {
     std::lock_guard<std::mutex> lock(m_mutex);
+    if (static_cast<int>(level) < static_cast<int>(m_level)) {
+        return;
+    }
+
     const char* level_str = "INFO";
     switch (level) {
+        case LogLevel::DEBUG:   level_str = "DBG "; break;
         case LogLevel::INFO:    level_str = "INFO"; break;
         case LogLevel::WARNING: level_str = "WARN"; break;
         case LogLevel::ERR:     level_str = "ERR "; break;
-        case LogLevel::DEBUG:   level_str = "DBG "; break;
     }
 
     std::cout << "[" << get_timestamp() << "] [" << level_str << "] " << message << std::endl;

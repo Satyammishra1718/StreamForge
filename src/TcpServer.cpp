@@ -5,8 +5,8 @@
 
 namespace streamforge {
 
-TcpServer::TcpServer(std::string host, uint16_t port)
-    : m_host(std::move(host)), m_port(port) {}
+TcpServer::TcpServer(std::string host, uint16_t port, MessageHandler handler)
+    : m_host(std::move(host)), m_port(port), m_message_handler(std::move(handler)) {}
 
 TcpServer::~TcpServer() {
     request_stop();

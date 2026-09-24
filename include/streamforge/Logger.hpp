@@ -8,15 +8,25 @@
 namespace streamforge {
 
 enum class LogLevel {
-    INFO,
-    WARNING,
-    ERR,
-    DEBUG
+    DEBUG = 0,
+    INFO = 1,
+    WARNING = 2,
+    ERR = 3
 };
 
 class Logger {
 public:
     static Logger& instance();
+
+    void set_level(LogLevel level) {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        m_level = level;
+    }
+
+    LogLevel get_level() const {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        return m_level;
+    }
 
     void log(LogLevel level, const std::string& message);
     void info(const std::string& message) { log(LogLevel::INFO, message); }
@@ -26,7 +36,8 @@ public:
 
 private:
     Logger() = default;
-    std::mutex m_mutex;
+    mutable std::mutex m_mutex;
+    LogLevel m_level{LogLevel::INFO};
     std::string get_timestamp();
 };
 

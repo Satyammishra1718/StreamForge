@@ -126,6 +126,66 @@ Result<uint64_t> Partition::append(const std::vector<uint8_t>& key, const std::v
     return assigned_offset;
 }
 
+Result<uint64_t> Partition::append_batch(const std::vector<std::pair<std::vector<uint8_t>, std::vector<uint8_t>>>& batch) {
+    if (batch.empty()) {
+        return Status::InvalidArgument("Cannot append empty batch");
+    }
+
+    std::lock_guard<std::mutex> lock(m_mutex);
+
+    // Validate size of every record in batch
+    for (const auto& item : batch) {
+        uint32_t record_size = 4 + 24 + static_cast<uint32_t>(item.first.size() + item.second.size());
+        if (record_size > MAX_RECORD_SIZE) {
+            return Status::RecordTooLarge("Record size (" + std::to_string(record_size) + ") exceeds maximum limit of 1 MiB");
+        }
+    }
+
+    uint64_t base_assigned_offset = m_next_offset;
+    int64_t now_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::system_clock::now().time_since_epoch()
+    ).count();
+
+    for (const auto& item : batch) {
+        uint32_t record_size = 4 + 24 + static_cast<uint32_t>(item.first.size() + item.second.size());
+
+        LogSegment* active = active_segment_unlocked();
+        if (!active) {
+            Status st = roll_segment_unlocked();
+            if (!st.ok()) return st;
+            active = active_segment_unlocked();
+        }
+
+        if (active->log_size_bytes() > 0 && active->log_size_bytes() + record_size > m_config.segment_max_bytes) {
+            Status st = roll_segment_unlocked();
+            if (!st.ok()) return st;
+            active = active_segment_unlocked();
+        }
+
+        Record record;
+        record.offset = m_next_offset;
+        record.timestamp_ms = now_ms;
+        record.key = item.first;
+        record.value = item.second;
+
+        // Pass false for sync_on_append per-record, we will sync once after batch if needed
+        Status st = active->append(record, false);
+        if (!st.ok()) {
+            return st;
+        }
+
+        m_next_offset++;
+    }
+
+    if (m_config.sync_on_append) {
+        for (auto& seg : m_segments) {
+            seg->flush();
+        }
+    }
+
+    return base_assigned_offset;
+}
+
 ReadResult Partition::read(uint64_t start_offset, size_t max_messages, size_t max_bytes) {
     std::lock_guard<std::mutex> lock(m_mutex);
     ReadResult res;

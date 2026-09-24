@@ -35,6 +35,9 @@ int main(int argc, char* argv[]) {
     std::string host = "127.0.0.1";
     uint16_t port = 9092;
     std::string data_dir = "./data";
+    uint32_t segment_bytes = streamforge::DEFAULT_SEGMENT_MAX_BYTES;
+    bool sync_on_append = true;
+    std::string log_level_str = "INFO";
 
     for (int i = 1; i < argc; ++i) {
         std::string arg = argv[i];
@@ -44,9 +47,26 @@ int main(int argc, char* argv[]) {
             port = static_cast<uint16_t>(std::atoi(argv[++i]));
         } else if (arg == "--data-dir" && i + 1 < argc) {
             data_dir = argv[++i];
+        } else if (arg == "--segment-bytes" && i + 1 < argc) {
+            segment_bytes = static_cast<uint32_t>(std::stoul(argv[++i]));
+        } else if (arg == "--sync-on-append" && i + 1 < argc) {
+            std::string val = argv[++i];
+            sync_on_append = (val == "true" || val == "1");
+        } else if (arg == "--log-level" && i + 1 < argc) {
+            log_level_str = argv[++i];
         } else if (arg.rfind("--", 0) != 0) {
             port = static_cast<uint16_t>(std::atoi(argv[i]));
         }
+    }
+
+    if (log_level_str == "DEBUG") {
+        streamforge::Logger::instance().set_level(streamforge::LogLevel::DEBUG);
+    } else if (log_level_str == "WARN" || log_level_str == "WARNING") {
+        streamforge::Logger::instance().set_level(streamforge::LogLevel::WARNING);
+    } else if (log_level_str == "ERROR" || log_level_str == "ERR") {
+        streamforge::Logger::instance().set_level(streamforge::LogLevel::ERR);
+    } else {
+        streamforge::Logger::instance().set_level(streamforge::LogLevel::INFO);
     }
 
     if (!SetConsoleCtrlHandler(console_ctrl_handler, TRUE)) {
@@ -57,6 +77,8 @@ int main(int argc, char* argv[]) {
     try {
         streamforge::StorageConfig storage_cfg;
         storage_cfg.data_dir = data_dir;
+        storage_cfg.segment_max_bytes = segment_bytes;
+        storage_cfg.sync_on_append = sync_on_append;
 
         streamforge::TopicManager topic_mgr(storage_cfg);
         streamforge::Status st = topic_mgr.open_and_recover_all();
@@ -76,7 +98,8 @@ int main(int argc, char* argv[]) {
             streamforge::Logger::instance().info(info);
         }
 
-        streamforge::TcpServer server(host, port);
+        streamforge::MessageHandler message_handler(topic_mgr);
+        streamforge::TcpServer server(host, port, message_handler);
         g_server_instance = &server;
         server.start();
         server.wait_until_stopped();

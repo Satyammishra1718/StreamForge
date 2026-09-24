@@ -28,6 +28,7 @@ public:
     Status open_and_recover();
 
     Result<uint64_t> append(const std::vector<uint8_t>& key, const std::vector<uint8_t>& value);
+    Result<uint64_t> append_batch(const std::vector<std::pair<std::vector<uint8_t>, std::vector<uint8_t>>>& batch);
     ReadResult read(uint64_t start_offset, size_t max_messages = 1000, size_t max_bytes = 1024 * 1024);
 
     uint64_t earliest_offset() const;

@@ -51,3 +51,7 @@ target_link_libraries(streamforge_storage PRIVATE streamforge_core)
 # Storage Unit Tests executable
 add_executable(streamforge_storage_tests tests/storage_tests.cpp)
 target_link_libraries(streamforge_storage_tests PRIVATE streamforge_core)
+
+# Protocol Unit Tests executable
+add_executable(streamforge_protocol_tests tests/protocol_tests.cpp)
+target_link_libraries(streamforge_protocol_tests PRIVATE streamforge_core)

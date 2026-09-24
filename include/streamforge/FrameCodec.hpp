@@ -22,17 +22,49 @@ constexpr uint32_t MAX_FRAME_LENGTH = 1024 * 1024; // 1 MiB
 constexpr uint32_t HEADER_SIZE = 5; // 1 byte type + 4 bytes request_id
 
 namespace MessageType {
+    // M1 message types
     constexpr uint8_t PING = 0x01;
     constexpr uint8_t ECHO = 0x02;
-    constexpr uint8_t PONG = 0x81;
+
+    // M3 Request types
+    constexpr uint8_t CREATE_TOPIC   = 0x10;
+    constexpr uint8_t PRODUCE        = 0x11;
+    constexpr uint8_t FETCH          = 0x12;
+    constexpr uint8_t LIST_TOPICS    = 0x13;
+    constexpr uint8_t DESCRIBE_TOPIC = 0x14;
+
+    // M1 Response types
+    constexpr uint8_t PONG       = 0x81;
     constexpr uint8_t ECHO_REPLY = 0x82;
+
+    // M3 Response types
+    constexpr uint8_t CREATE_TOPIC_OK   = 0x90;
+    constexpr uint8_t PRODUCE_OK        = 0x91;
+    constexpr uint8_t FETCH_OK          = 0x92;
+    constexpr uint8_t TOPICS            = 0x93;
+    constexpr uint8_t TOPIC_DESCRIPTION = 0x94;
+
+    // Error frame
     constexpr uint8_t MSG_ERROR = 0xFF;
 }
 
 namespace ErrorCode {
-    constexpr uint16_t UNKNOWN_TYPE = 1;
-    constexpr uint16_t FRAME_TOO_LARGE = 2;
-    constexpr uint16_t MALFORMED_FRAME = 3;
+    // M1 error codes
+    constexpr uint16_t UNKNOWN_TYPE     = 1;
+    constexpr uint16_t FRAME_TOO_LARGE  = 2;
+    constexpr uint16_t MALFORMED_FRAME  = 3;
+
+    // M3 error codes
+    constexpr uint16_t UNKNOWN_TOPIC        = 4;
+    constexpr uint16_t TOPIC_ALREADY_EXISTS = 5;
+    constexpr uint16_t INVALID_TOPIC_NAME   = 6;
+    constexpr uint16_t INVALID_PARTITION    = 7;
+    constexpr uint16_t OFFSET_OUT_OF_RANGE  = 8;
+    constexpr uint16_t RECORD_TOO_LARGE     = 9;
+    constexpr uint16_t MALFORMED_BODY       = 10;
+    constexpr uint16_t CORRUPT_DATA         = 11;
+    constexpr uint16_t INTERNAL_ERROR       = 12;
+    constexpr uint16_t INVALID_ARGUMENT     = 13;
 }
 
 struct Frame {
