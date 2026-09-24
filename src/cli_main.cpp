@@ -287,23 +287,23 @@ int main(int argc, char* argv[]) {
             return 0;
 
         } else if (command == "pipeline") {
-            if (args.empty()) {
-                std::cerr << "Usage: streamforge_cli pipeline COUNT\n";
-                return 1;
-            }
-            size_t count = static_cast<size_t>(std::stoul(args[0]));
+            size_t count = args.empty() ? 100 : static_cast<size_t>(std::stoul(args[0]));
+            std::cout << "Pipelining " << count << " PING requests back-to-back...\n";
             std::vector<uint32_t> sent_req_ids;
             sent_req_ids.reserve(count);
+            std::vector<uint8_t> all_bytes;
 
             for (size_t i = 0; i < count; ++i) {
                 uint32_t id = req_id++;
                 sent_req_ids.push_back(id);
                 Frame req{ HEADER_SIZE, MessageType::PING, id, {} };
                 std::vector<uint8_t> enc = FrameCodec::encode(req);
-                if (sock.send_all(enc.data(), enc.size()) != SendResult::Success) {
-                    std::cerr << "Pipeline send failed at index " << i << "\n";
-                    return 1;
-                }
+                all_bytes.insert(all_bytes.end(), enc.begin(), enc.end());
+            }
+
+            if (sock.send_all(all_bytes.data(), all_bytes.size()) != SendResult::Success) {
+                std::cerr << "Pipeline send failed\n";
+                return 1;
             }
 
             for (size_t i = 0; i < count; ++i) {
@@ -312,20 +312,23 @@ int main(int argc, char* argv[]) {
                     std::cerr << "Pipeline recv failed at index " << i << "\n";
                     return 1;
                 }
-                if (resp.request_id != sent_req_ids[i]) {
+                if (resp.type != MessageType::PONG || resp.request_id != sent_req_ids[i]) {
                     std::cerr << "Pipeline ordering violation: expected req_id=" << sent_req_ids[i]
                               << ", got " << resp.request_id << "\n";
                     return 1;
                 }
             }
-            std::cout << "Successfully pipelined " << count << " requests in strict FIFO order.\n";
+            std::cout << "SUCCESS: All " << count << " pipelined responses received in strict sequential order with matching request_ids!\n";
             return 0;
 
         } else if (command == "shutdown") {
             Frame req{ HEADER_SIZE, MessageType::SHUTDOWN, req_id++, {} };
-            std::vector<uint8_t> enc = FrameCodec::encode(req);
-            sock.send_all(enc.data(), enc.size());
-            std::cout << "Sent shutdown signal to server.\n";
+            Frame resp;
+            if (!send_and_receive(sock, req, resp)) {
+                std::cout << "Server shutdown acknowledged\n";
+                return 0;
+            }
+            std::cout << "Server shutdown acknowledged (req_id=" << resp.request_id << ")\n";
             return 0;
 
         } else if (command == "ping") {
@@ -345,7 +348,7 @@ int main(int argc, char* argv[]) {
             Frame resp;
             if (!send_and_receive(sock, req, resp)) return 1;
             std::string echoed(resp.body.begin(), resp.body.end());
-            std::cout << echoed << "\n";
+            std::cout << "ECHO_REPLY received: " << echoed << "\n";
             return 0;
 
         } else if (command == "slow-echo") {
@@ -367,22 +370,147 @@ int main(int argc, char* argv[]) {
             size_t size = args.empty() ? 2 * 1024 * 1024 : static_cast<size_t>(std::stoul(args[0]));
             uint8_t len_bytes[4];
             FrameCodec::write_u32(len_bytes, static_cast<uint32_t>(size));
-            sock.send_all(len_bytes, 4);
+            if (sock.send_all(len_bytes, 4) != SendResult::Success) {
+                std::cerr << "Failed to send big-frame length header\n";
+                return 1;
+            }
             Frame resp;
-            read_response_frame(sock, resp);
+            if (!read_response_frame(sock, resp)) return 1;
+            uint16_t code = 0;
+            std::string err_msg;
+            if (!FrameCodec::parse_error_frame(resp, code, err_msg) || code != ErrorCode::FRAME_TOO_LARGE) {
+                std::cerr << "BIG-FRAME test failed. Expected error code 2, got code: " << code << "\n";
+                return 1;
+            }
+            std::cout << "BIG-FRAME rejected with ERROR code 2 as expected (" << err_msg << ")\n";
             return 0;
 
         } else if (command == "garbage") {
-            uint8_t junk[16] = { 0xFF, 0xFE, 0xFD, 0xFC, 0x00, 0x01, 0x02, 0x03 };
-            sock.send_all(junk, 16);
+            uint8_t len_buf[4];
+            FrameCodec::write_u32(len_buf, 2);
+            uint8_t garbage_payload[2] = {0xAA, 0xBB};
+            if (sock.send_all(len_buf, 4) != SendResult::Success ||
+                sock.send_all(garbage_payload, 2) != SendResult::Success) {
+                std::cerr << "Failed to send garbage frame\n";
+                return 1;
+            }
             Frame resp;
-            read_response_frame(sock, resp);
+            if (!read_response_frame(sock, resp)) return 1;
+            uint16_t code = 0;
+            std::string err_msg;
+            if (!FrameCodec::parse_error_frame(resp, code, err_msg) || code != ErrorCode::MALFORMED_FRAME) {
+                std::cerr << "GARBAGE test failed. Expected error code 3, got code: " << code << "\n";
+                return 1;
+            }
+            std::cout << "GARBAGE rejected with ERROR code 3 as expected (" << err_msg << ")\n";
+            return 0;
+
+        } else if (command == "malformed-produce") {
+            // Hand-crafted PRODUCE body: lying key length (error 10), then PING on same connection.
+            BodyWriter w;
+            w.write_string("orders");
+            w.write_i32(0);
+            w.write_u16(1);
+            w.write_u32(10000);
+            w.write_u8('A');
+
+            std::vector<uint8_t> body = w.take_buffer();
+            Frame req{ HEADER_SIZE + static_cast<uint32_t>(body.size()), MessageType::PRODUCE, req_id++, body };
+            std::vector<uint8_t> data = FrameCodec::encode(req);
+            if (sock.send_all(data.data(), data.size()) != SendResult::Success) {
+                std::cerr << "Failed to send malformed PRODUCE frame\n";
+                return 1;
+            }
+
+            Frame resp;
+            if (!read_response_frame(sock, resp)) return 1;
+            uint16_t code = 0;
+            std::string err_msg;
+            if (!FrameCodec::parse_error_frame(resp, code, err_msg) || code != ErrorCode::MALFORMED_BODY) {
+                std::cerr << "MALFORMED-PRODUCE test failed. Expected error code 10, got code: " << code << "\n";
+                return 1;
+            }
+
+            Frame ping_req;
+            ping_req.type = MessageType::PING;
+            ping_req.request_id = req_id++;
+            ping_req.length = HEADER_SIZE;
+            if (!send_and_receive(sock, ping_req, resp)) return 1;
+            std::cout << "MALFORMED-PRODUCE received ERROR code 10, subsequent PING succeeded\n";
+            return 0;
+
+        } else if (command == "produce-oversized") {
+            if (args.empty()) {
+                std::cerr << "Usage: streamforge_cli produce-oversized TOPIC\n";
+                return 1;
+            }
+            std::string topic_name = args[0];
+            // Encoded on-disk record must exceed 1 MiB; keep the PRODUCE frame at or under 1 MiB.
+            const size_t value_size = 1048549;
+
+            ProduceRequest req_msg;
+            req_msg.topic = topic_name;
+            req_msg.partition = 0;
+            req_msg.record_count = 1;
+            req_msg.records.push_back({ {}, std::vector<uint8_t>(value_size, 'X') });
+
+            BodyWriter writer;
+            req_msg.encode(writer);
+            std::vector<uint8_t> body = writer.take_buffer();
+            if (HEADER_SIZE + body.size() > MAX_FRAME_LENGTH) {
+                std::cerr << "Internal test payload exceeds max frame size\n";
+                return 1;
+            }
+
+            Frame req{ HEADER_SIZE + static_cast<uint32_t>(body.size()), MessageType::PRODUCE, req_id++, body };
+            std::vector<uint8_t> encoded = FrameCodec::encode(req);
+            if (sock.send_all(encoded.data(), encoded.size()) != SendResult::Success) {
+                std::cerr << "Failed to send produce-oversized frame\n";
+                return 1;
+            }
+
+            Frame resp;
+            if (!read_response_frame(sock, resp)) return 1;
+            uint16_t err_code = 0;
+            std::string err_msg;
+            if (resp.type != MessageType::MSG_ERROR ||
+                !FrameCodec::parse_error_frame(resp, err_code, err_msg) ||
+                err_code != ErrorCode::RECORD_TOO_LARGE) {
+                std::cerr << "PRODUCE-OVERSIZED test failed. Expected error code 9, got type=0x"
+                          << static_cast<int>(resp.type) << " code=" << err_code << "\n";
+                return 1;
+            }
+            std::cout << "PRODUCE-OVERSIZED rejected with ERROR code 9 as expected (" << err_msg << ")\n";
             return 0;
 
         } else if (command == "unknown-type") {
             Frame req{ HEADER_SIZE, 0x7E, req_id++, {} };
+            std::vector<uint8_t> data = FrameCodec::encode(req);
+            if (sock.send_all(data.data(), data.size()) != SendResult::Success) {
+                std::cerr << "Failed to send unknown-type frame\n";
+                return 1;
+            }
             Frame resp;
-            send_and_receive(sock, req, resp);
+            if (!read_response_frame(sock, resp)) return 1;
+            uint16_t code = 0;
+            std::string err_msg;
+            if (!FrameCodec::parse_error_frame(resp, code, err_msg) || code != ErrorCode::UNKNOWN_TYPE) {
+                std::cerr << "UNKNOWN-TYPE test failed. Expected error code 1, got code: " << code << "\n";
+                return 1;
+            }
+            Frame ping_req{ HEADER_SIZE, MessageType::PING, req_id++, {} };
+            std::vector<uint8_t> ping_data = FrameCodec::encode(ping_req);
+            if (sock.send_all(ping_data.data(), ping_data.size()) != SendResult::Success) {
+                std::cerr << "Failed to send follow-up PING on open connection\n";
+                return 1;
+            }
+            Frame ping_resp;
+            if (!read_response_frame(sock, ping_resp)) return 1;
+            if (ping_resp.type != MessageType::PONG) {
+                std::cerr << "Follow-up PING failed after unknown type error\n";
+                return 1;
+            }
+            std::cout << "UNKNOWN-TYPE received ERROR code 1, subsequent PING succeeded\n";
             return 0;
 
         } else if (command == "create-topic") {
@@ -402,7 +530,7 @@ int main(int argc, char* argv[]) {
             Frame resp;
             if (!send_and_receive(sock, req, resp)) return 1;
 
-            std::cout << "Topic '" << topic_name << "' created with " << num_partitions << " partition(s)\n";
+            std::cout << "Successfully created topic '" << topic_name << "' with " << num_partitions << " partition(s)\n";
             return 0;
 
         } else if (command == "produce") {
@@ -437,37 +565,44 @@ int main(int argc, char* argv[]) {
                 return 1;
             }
 
-            std::cout << "Produced 1 record to '" << topic_name << "' P" << resp_msg.partition
+            std::cout << "Produced 1 record to topic '" << topic_name << "' partition " << resp_msg.partition
                       << " base_offset=" << resp_msg.base_offset << "\n";
             return 0;
 
-        } else if (command == "produce-batch") {
+        } else if (command == "produce-many" || command == "produce-batch") {
             if (args.empty()) {
-                std::cerr << "Usage: streamforge_cli produce-batch TOPIC [--size N] [--batch B] [--key-prefix P] [--partition P]\n";
+                std::cerr << "Usage: streamforge_cli produce-many TOPIC [COUNT] [--size BYTES] [--batch N] [--key-prefix P] [--partition P]\n";
                 return 1;
             }
             std::string topic_name = args[0];
-            size_t total_to_produce = size_arg;
+            size_t total_count = (args.size() > 1) ? static_cast<size_t>(std::stoul(args[1])) : size_arg;
             size_t batch_sz = (batch_arg > 0) ? batch_arg : 100;
+            size_t val_bytes = (size_arg > 0) ? size_arg : 64;
+
+            auto start_time = std::chrono::high_resolution_clock::now();
+
             size_t produced = 0;
+            while (produced < total_count) {
+                size_t current_batch_size = std::min(batch_sz, total_count - produced);
 
-            auto start_time = std::chrono::steady_clock::now();
-
-            while (produced < total_to_produce) {
-                size_t cur_batch = std::min(batch_sz, total_to_produce - produced);
                 ProduceRequest req_msg;
                 req_msg.topic = topic_name;
                 req_msg.partition = partition_arg;
-                req_msg.record_count = static_cast<uint16_t>(cur_batch);
+                req_msg.record_count = static_cast<uint16_t>(current_batch_size);
 
-                for (size_t i = 0; i < cur_batch; ++i) {
-                    size_t idx = produced + i;
-                    std::string k = key_prefix_arg.empty() ? "" : (key_prefix_arg + "_" + std::to_string(idx));
-                    std::string v = "val_" + std::to_string(idx);
-                    req_msg.records.push_back({
-                        std::vector<uint8_t>(k.begin(), k.end()),
-                        std::vector<uint8_t>(v.begin(), v.end())
-                    });
+                std::vector<uint8_t> val_payload(val_bytes, 'X');
+
+                for (size_t i = 0; i < current_batch_size; ++i) {
+                    ProduceRecordPayload rec;
+                    if (!key_prefix_arg.empty()) {
+                        std::string k = key_prefix_arg + std::to_string(produced + i);
+                        rec.key.assign(k.begin(), k.end());
+                    } else if (!key_arg.empty()) {
+                        std::string k = key_arg + "_" + std::to_string(produced + i);
+                        rec.key.assign(k.begin(), k.end());
+                    }
+                    rec.value = val_payload;
+                    req_msg.records.push_back(std::move(rec));
                 }
 
                 BodyWriter writer;
@@ -478,17 +613,16 @@ int main(int argc, char* argv[]) {
                 Frame resp;
                 if (!send_and_receive(sock, req, resp)) return 1;
 
-                produced += cur_batch;
+                produced += current_batch_size;
             }
 
-            auto end_time = std::chrono::steady_clock::now();
+            auto end_time = std::chrono::high_resolution_clock::now();
             double elapsed_sec = std::chrono::duration<double>(end_time - start_time).count();
-            double rate = (elapsed_sec > 0.0) ? (static_cast<double>(produced) / elapsed_sec) : 0.0;
+            double throughput = elapsed_sec > 0.0 ? (static_cast<double>(total_count) / elapsed_sec) : total_count;
 
-            std::cout << "Produced " << produced << " records to '" << topic_name
-                      << "' in batches of " << batch_sz
-                      << " (elapsed: " << elapsed_sec << "s, throughput: "
-                      << static_cast<uint64_t>(rate) << " records/sec)\n";
+            std::cout << "Produced " << total_count << " records to '" << topic_name << "' in batches of "
+                      << batch_sz << " (elapsed: " << elapsed_sec << "s, throughput: "
+                      << static_cast<uint64_t>(throughput) << " records/sec)\n";
             return 0;
 
         } else if (command == "fetch") {
