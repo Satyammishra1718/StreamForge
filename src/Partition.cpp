@@ -129,21 +129,6 @@ LogSegment* Partition::active_segment_unlocked() {
 }
 
 Status Partition::roll_segment_unlocked() {
-    if (!m_segments.empty()) {
-        LogSegment* old_seg = m_segments.back().get();
-        old_seg->seal();
-
-        // Crash injection point: between sealing and writing .sealed sidecar
-        CrashPoint::maybe_die("between_seal_and_sealed");
-
-        Status st = old_seg->write_sealed_marker();
-        if (!st.ok()) {
-            return st;
-        }
-        old_seg->flush();
-        FileHandle::flush_directory(m_partition_dir);
-    }
-
     uint64_t new_base_offset = m_next_offset;
     auto new_seg = std::make_unique<LogSegment>(new_base_offset, m_partition_dir, m_config.index_interval_bytes);
     Status st = new_seg->open();
@@ -152,6 +137,22 @@ Status Partition::roll_segment_unlocked() {
     }
     m_segments.push_back(std::move(new_seg));
     FileHandle::flush_directory(m_partition_dir);
+
+    if (m_segments.size() > 1) {
+        LogSegment* old_seg = m_segments[m_segments.size() - 2].get();
+        old_seg->seal();
+
+        // Crash injection point: between sealing and writing .sealed sidecar
+        CrashPoint::maybe_die("between_seal_and_sealed");
+
+        st = old_seg->write_sealed_marker();
+        if (!st.ok()) {
+            return st;
+        }
+        old_seg->flush();
+        FileHandle::flush_directory(m_partition_dir);
+    }
+
     return Status::OK();
 }
 

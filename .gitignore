@@ -1,4 +1,5 @@
 build/
+build-crash-testing/
 *.obj
 *.exe
 *.o

@@ -565,7 +565,16 @@ int main(int argc, char* argv[]) {
                 return 1;
             }
             std::string topic_name = args[0];
-            std::string value_str = (args.size() > 1) ? args[1] : "";
+            std::string value_str;
+            for (size_t i = 1; i < args.size(); ++i) {
+                if (args[i] == "--partition" && i + 1 < args.size()) {
+                    partition_arg = std::stoi(args[++i]);
+                } else if (args[i] == "--key" && i + 1 < args.size()) {
+                    key_arg = args[++i];
+                } else if (value_str.empty() && args[i].rfind("--", 0) != 0) {
+                    value_str = args[i];
+                }
+            }
 
             ProduceRequest req_msg;
             req_msg.topic = topic_name;

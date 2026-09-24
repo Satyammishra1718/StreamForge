@@ -123,8 +123,11 @@ Status LogSegment::append_with_timestamp(Record& record, int64_t custom_ts, bool
     }
 
 #ifdef STREAMFORGE_CRASH_TESTING
+    char crash_buf[256];
+    DWORD c_len = GetEnvironmentVariableA("STREAMFORGE_CRASH_AT", crash_buf, sizeof(crash_buf));
     const char* crash_target = std::getenv("STREAMFORGE_CRASH_AT");
-    if (crash_target && std::strcmp(crash_target, "mid_write_record") == 0) {
+    if ((c_len > 0 && std::strcmp(crash_buf, "mid_write_record") == 0) ||
+        (crash_target && std::strcmp(crash_target, "mid_write_record") == 0)) {
         DWORD half = static_cast<DWORD>(encoded.size() / 2);
         if (half > 0) {
             m_log_file.write(encoded.data(), half);
