@@ -349,6 +349,15 @@ void TcpServer::event_loop() {
                 Frame frame;
                 FrameExtractResult res;
                 while ((res = conn->assembler.extract_next_frame(frame)) == FrameExtractResult::FrameReady) {
+                    if (frame.type == MessageType::SHUTDOWN) {
+                        Logger::instance().info("Graceful shutdown requested via protocol command.");
+                        Frame ok_frame{ HEADER_SIZE, MessageType::SHUTDOWN_OK, frame.request_id, {} };
+                        std::vector<uint8_t> encoded = FrameCodec::encode(ok_frame);
+                        ::send(conn->socket.get(), reinterpret_cast<const char*>(encoded.data()), static_cast<int>(encoded.size()), 0);
+                        request_stop();
+                        break;
+                    }
+
                     if (conn->in_flight) {
                         // ORDERING: Request pipelined on same connection buffers until previous response completes
                         conn->pending_requests.push(std::move(frame));

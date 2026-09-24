@@ -7,3 +7,5 @@ build/
 *.ilk
 .vscode/
 .idea/
+temp_*/
+*.log

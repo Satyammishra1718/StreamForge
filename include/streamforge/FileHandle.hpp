@@ -54,8 +54,15 @@ public:
 
     bool write(const void* buffer, DWORD size, DWORD* bytes_written = nullptr) {
         if (!is_valid()) return false;
+        // On Windows, passing 0xFFFFFFFF in Offset and OffsetHigh instructs WriteFile
+        // to atomically append to the end of the file, completely immune to file pointer
+        // modifications from concurrent or positional read_at calls.
+        OVERLAPPED ov;
+        std::memset(&ov, 0, sizeof(ov));
+        ov.Offset = 0xFFFFFFFF;
+        ov.OffsetHigh = 0xFFFFFFFF;
         DWORD written = 0;
-        BOOL res = WriteFile(m_handle, buffer, size, &written, nullptr);
+        BOOL res = WriteFile(m_handle, buffer, size, &written, &ov);
         if (bytes_written) *bytes_written = written;
         return (res != FALSE) && (written == size);
     }

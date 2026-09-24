@@ -254,6 +254,20 @@ int main(int argc, char* argv[]) {
             std::cout << "SUCCESS: All " << n << " pipelined responses received in strict sequential order with matching request_ids!\n";
             return 0;
 
+        } else if (command == "shutdown") {
+            Frame req;
+            req.type = MessageType::SHUTDOWN;
+            req.request_id = req_id++;
+            req.length = HEADER_SIZE;
+
+            Frame resp;
+            if (!send_and_receive(sock, req, resp)) {
+                std::cout << "Server shutdown acknowledged\n";
+                return 0;
+            }
+            std::cout << "Server shutdown acknowledged (req_id=" << resp.request_id << ")\n";
+            return 0;
+
         } else if (command == "ping") {
             Frame req;
             req.type = MessageType::PING;

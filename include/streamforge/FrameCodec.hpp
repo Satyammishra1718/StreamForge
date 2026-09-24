@@ -25,6 +25,7 @@ namespace MessageType {
     // M1 message types
     constexpr uint8_t PING = 0x01;
     constexpr uint8_t ECHO = 0x02;
+    constexpr uint8_t SHUTDOWN = 0x05;
 
     // M3 Request types
     constexpr uint8_t CREATE_TOPIC   = 0x10;
@@ -34,8 +35,9 @@ namespace MessageType {
     constexpr uint8_t DESCRIBE_TOPIC = 0x14;
 
     // M1 Response types
-    constexpr uint8_t PONG       = 0x81;
-    constexpr uint8_t ECHO_REPLY = 0x82;
+    constexpr uint8_t PONG        = 0x81;
+    constexpr uint8_t ECHO_REPLY  = 0x82;
+    constexpr uint8_t SHUTDOWN_OK = 0x85;
 
     // M3 Response types
     constexpr uint8_t CREATE_TOPIC_OK   = 0x90;

@@ -175,3 +175,118 @@ Every client request processed by StreamForge follows a clear 6-step lifecycle:
 #### Q6: Why does ordering hold within a partition but not across partitions?
 - **Partition-Level Guarantee**: A partition is backed by a single append-only log protected by a partition mutex. Offsets are strictly sequential ($0, 1, 2, \dots$), ensuring total ordering for records within that partition.
 - **Cross-Partition Non-Guarantee**: Different partitions run independently with separate offset sequences. Concurrent writes to Partition 0 and Partition 1 have no shared sequence order or global timestamp synchronization.
+
+---
+
+## Milestone 4: I/O Event Loop and Worker Thread Pool
+
+### 1. Request Lifecycle Walkthrough (PRODUCE Request Under Event Loop Architecture)
+
+In Milestone 4, StreamForge replaces the thread-per-connection model with an asynchronous single-threaded I/O event loop driven by `WSAPoll`, decoupled worker thread pool, and non-blocking sockets.
+
+Here is the exact lifecycle of a `PRODUCE` request through every layer of the new architecture:
+
+1. **Wire Arrival & Kernel Buffering**:
+   - **Thread**: Client OS network stack.
+   - **Action**: The client transmits raw TCP bytes for a `PRODUCE` request frame over the network. Windows TCP stack receives the packets and appends them to the socket's kernel receive buffer.
+
+2. **`WSAPoll` Event Detection**:
+   - **Thread**: Dedicated I/O Thread.
+   - **Lock**: None.
+   - **Action**: The I/O thread waits inside `WSAPoll(pollfds, count, timeout)`. When incoming bytes arrive in the client socket's kernel buffer, `WSAPoll` returns with the `POLLRDNORM` / `POLLIN` flag set for that socket.
+   - **What if it would block?**: `WSAPoll` sleeps in the kernel with a timeout (e.g. 100ms or until loopback wakeup). It uses 0% CPU while idle and never blocks any worker or application thread.
+
+3. **Non-blocking `recv()` & Frame Reassembly**:
+   - **Thread**: Dedicated I/O Thread.
+   - **Lock**: None (Single-Owner Rule: only the I/O thread reads or writes socket data and connection state).
+   - **Action**: The I/O thread invokes non-blocking `recv()`. The returned bytes are fed into the connection's `FrameAssembler`. The assembler's state machine transitions from `WAITING_FOR_LENGTH` (parsing 4-byte header) to `READING_PAYLOAD` (accumulating body).
+   - **What if it would block?**: Because the socket is non-blocking (`FIONBIO`), if only a partial frame has arrived or `recv()` returns `WSAEWOULDBLOCK`, the I/O thread does NOT block. It simply preserves partial frame state in `FrameAssembler`, keeps the socket in `pollfds`, and moves on to service other connections.
+
+4. **Backpressure Check & Task Enqueue**:
+   - **Thread**: Dedicated I/O Thread.
+   - **Lock**: `TaskQueue::m_mutex` (held only for the brief microseconds of pushing the task into `std::queue` and notifying via `std::condition_variable`).
+   - **Backpressure Mechanism**: Before enqueueing, the I/O thread checks if `task_queue.size() >= max_queue_depth` (e.g. 1024).
+   - **What if it would block?**: If the task queue is saturated, the I/O thread does NOT block; it immediately removes `POLLIN` from this connection's `pollfd` entry. The server stops reading from the socket, causing the client's TCP window to fill up and backpressure to propagate across the network to the client producer. Once the worker pool drains tasks below the low-water mark, `POLLIN` is re-enabled. When space is available, the assembled frame is packaged into an `InboundTask`, `m_in_flight_tasks` is incremented, and it is pushed into `TaskQueue`.
+
+5. **Worker Pickup & Request Decoding**:
+   - **Thread**: Worker Thread (from a fixed pool of $N$ threads).
+   - **Lock**: `TaskQueue::m_mutex` acquired while waiting on `std::condition_variable::wait()`. The lock is held only during the $O(1)$ queue pop and released immediately.
+   - **Action**: A worker thread wakes up via `m_cv.notify_one()`, extracts the task, and parses the request using `FrameCodec` and `BodyReader`.
+
+6. **Storage Partition Routing & Append**:
+   - **Thread**: Worker Thread.
+   - **Locks**:
+     - *Topic Lookup*: Acquires `TopicManager::m_rw_lock` with `std::shared_lock` (reader lock) held only while looking up the topic pointer in the map. Multiple workers can read topic metadata concurrently without blocking each other.
+     - *Partition Append*: Acquires `Partition::m_mutex` (`std::mutex`, exclusive lock) on the target partition.
+   - **Action**: The worker serializes records, assigns contiguous monotonically increasing offsets, appends records to the active `.log` segment file, appends sparse index entries to `.index`, and calls `FlushFileBuffers()` if `sync_on_append == true`.
+   - **What if it would block?**: Workers appending to different partitions (or different topics) proceed completely in parallel with zero lock contention! If two workers target the exact same partition, the second worker waits on `Partition::m_mutex` until the first completes its append, guaranteeing strict offset ordering ($0, 1, 2, \dots$) on disk.
+
+7. **Completion Enqueue & Loopback Wakeup**:
+   - **Thread**: Worker Thread.
+   - **Lock**: `CompletionQueue::m_mutex` (held briefly for an $O(1)$ push).
+   - **Action**: The worker serializes the `PRODUCE_OK` frame into a `CompletionTask` with the connection ID. It pushes it into `CompletionQueue`, releases the lock, and sends a 1-byte notification (`0x01`) into the `WakeupChannel` loopback socket write end.
+   - **What if it would block?**: Loopback socket writes for 1 byte return instantly without blocking.
+
+8. **Loopback Notification & Completion Draining**:
+   - **Thread**: Dedicated I/O Thread.
+   - **Lock**: `CompletionQueue::m_mutex` held briefly during `drain()` to swap the pending responses into a local thread vector.
+   - **Action**: `WSAPoll` detects readability on the loopback wakeup socket (`POLLRDNORM`). The I/O thread drains the 1-byte ping, extracts all completed responses from `CompletionQueue`, and decrements `m_in_flight_tasks`.
+
+9. **Non-blocking `send()` & Writable Polling**:
+   - **Thread**: Dedicated I/O Thread.
+   - **Lock**: None (Single-Owner Rule).
+   - **Action**: The I/O thread locates the target `ConnectionState` by connection ID. If the connection's output buffer is empty, it attempts an immediate non-blocking `send()`.
+   - **What if it would block?**: If the socket kernel send buffer cannot accept the complete frame, `send()` writes as many bytes as possible and returns without blocking. The unsent bytes are placed in `ConnectionState::out_buffer`, and `POLLWRNORM` / `POLLOUT` is added to `pollfds` for this connection. The I/O thread immediately continues servicing other sockets. When the kernel buffer frees space, `WSAPoll` signals `POLLOUT` and the I/O thread flushes the remaining bytes.
+
+10. **Slow Consumer Defense & Delivery to Wire**:
+    - **Thread**: Dedicated I/O Thread.
+    - **Action**: If a slow client stalls reading and its buffered output exceeds `max_output_buffer_bytes` (e.g. 64 MiB), the server forcibly disconnects the socket to prevent unbounded broker memory exhaustion. Otherwise, once all bytes are flushed, `POLLOUT` is removed, and the client receives its acknowledged `PRODUCE_OK` response.
+
+---
+
+### 2. Deep-Dive Concurrency & Event Loop Questions & Answers
+
+#### Q1: What is an event loop and why can it handle 10,000 connections with 1 thread while thread-per-connection cannot?
+- **Thread-per-Connection Overhead**: Each OS thread on Windows reserves 1 MiB of stack space by default. 10,000 connections require ~10 GiB of RAM just for thread stacks. Furthermore, operating system schedulers incur massive CPU overhead context-switching among 10,000 threads. In practice, 99% of connections are idle at any given millisecond (waiting on client think-time or network packets).
+- **Event Loop Scalability**: An event loop uses a single OS thread that registers all 10,000 socket descriptors with an OS multiplexer (`WSAPoll`, epoll, or IOCP). The operating system puts the event loop thread to sleep until one or more sockets actually have I/O ready. When awakened, the event loop processes only the sockets with active traffic. Memory consumption for 10,000 connections drops to just the socket descriptors and connection state buffers (~few MBs total), and CPU context switches are eliminated.
+
+#### Q2: What is backpressure and what bad thing happens if you do not have it?
+- **Definition**: Backpressure is a flow-control mechanism where an overloaded downstream component (worker threads or disk storage) signals upstream producers to slow down or halt transmission until the backlog clears.
+- **Consequences Without Backpressure**: If producers send 50,000 requests/second while storage can only write 10,000 requests/second, unbounded task queues accumulate millions of requests in memory. This inevitably leads to process crash due to Out-Of-Memory (OOM), or severe latency spikes where requests sit queued for minutes before being dropped.
+- **Our Implementation**: When `TaskQueue` exceeds `max_queue_depth`, the I/O thread removes `POLLIN` from client sockets. The TCP receive window shrinks to zero, and the client's own `send()` blocks at the transport layer, safely regulating ingestion rate to disk write speed.
+
+#### Q3: Why do we keep partition mutexes exclusive instead of using `shared_mutex` on partitions?
+- **Append is an Exclusive Mutation**: Appending to a partition modifies the active log segment, writes to `.log`, appends to `.index`, and increments `next_offset`. This requires an exclusive lock.
+- **Overhead of `shared_mutex`**: `std::shared_mutex` incurs non-trivial cache-line bouncing and atomic read-counter increments on every shared lock acquisition. In high-frequency messaging, this overhead can exceed the cost of the actual critical section.
+- **Partitioning as Concurrency Domains**: Concurrency in Kafka/StreamForge is achieved by partitioning across logs, not by concurrent writes to the same log. Partitions 0, 1, 2, and 3 run completely concurrently on separate worker threads without any lock contention. Within a single partition, operations are serialized to guarantee strict linear ordering, making a standard `std::mutex` both simpler and faster.
+
+#### Q4: What is a "thundering herd" and does our thread pool suffer from it? Why or why not?
+- **Definition**: A "thundering herd" occurs when multiple waiting threads are simultaneously awakened to compete for a single unit of work. One thread claims the work while all other threads waste CPU cycles context switching only to discover nothing is available and go back to sleep.
+- **Our Thread Pool**: StreamForge does NOT suffer from a thundering herd. When a new task is pushed to `TaskQueue`, it calls `m_cv.notify_one()`, waking exactly ONE worker thread. The Windows kernel schedules that single thread to pop the task. `notify_all()` is reserved strictly for server shutdown.
+
+#### Q5: What is the single-owner rule for sockets and what race condition does it prevent?
+- **Rule**: Only the I/O thread is allowed to read from, write to, poll, or close client sockets. Worker threads never interact with socket handles directly.
+- **Prevented Race Conditions**:
+  - *Interleaved Frame Corruption*: If two worker threads attempted to call `send()` on the same socket concurrently, their byte streams would interleave, corrupting binary protocol frames.
+  - *Socket Descriptor Reuse Race*: If a worker closed a disconnected socket while the I/O thread was calling `WSAPoll()` or `recv()`, the socket descriptor could be closed mid-call or immediately reassigned by the OS kernel to a newly accepted connection, resulting in the I/O thread reading or closing another client's active connection.
+
+#### Q6: Why did we use a loopback socket pair for wakeups instead of Windows Event objects? What would change if we used IOCP later?
+- **`WSAPoll` Limitation**: `WSAPoll` is designed to monitor Winsock `SOCKET` descriptors only; it cannot wait on arbitrary Win32 kernel handles such as Windows Event objects (`CreateEvent`). A loopback TCP socket pair (`127.0.0.1`) provides a valid `SOCKET` descriptor that can be placed directly inside the `pollfd` array, allowing any worker thread to instantly wake `WSAPoll` with a 1-byte write.
+- **With IOCP Later**: Windows I/O Completion Ports (IOCP) natively integrate with asynchronous I/O (`WSARecv` / `WSASend`). Completion events are dispatched directly by the Windows kernel to worker threads via `GetQueuedCompletionStatus()`. Threads can post custom completion packets using `PostQueuedCompletionStatus()` without needing loopback sockets or wakeup pings.
+
+#### Q7: What is a "slow loris" attack and how does our read-stall timeout defend against it?
+- **Attack Mechanism**: An attacker opens hundreds of connections and sends requests at an agonizingly slow pace (e.g. 1 byte every 10 seconds). In naive servers, these incomplete requests consume connection slots and buffer memory indefinitely, eventually exhausting all available descriptors and blocking legitimate clients.
+- **Defense**: StreamForge tracks `last_read_time` on every `ConnectionState`. The I/O thread periodically scans connections that have partial, uncompleted frames in their `FrameAssembler`. If `now - last_read_time > read_stall_timeout_sec` (default 30 seconds), the broker forcibly terminates the connection, reclaiming resources and thwarting Slow Loris starvation.
+
+#### Q8: What happens to in-flight requests when the server gets a shutdown signal?
+- **Graceful Shutdown Sequence**:
+  1. The listening socket stops accepting new incoming connections.
+  2. The `TaskQueue` is stopped so no new tasks are accepted.
+  3. Worker threads finish executing all tasks already queued, deposit their results into `CompletionQueue`, and exit.
+  4. The I/O thread drains all remaining completed responses from `CompletionQueue`, writes them out to clients, flushes socket buffers, and closes connections with `shutdown(s, SD_SEND)` / `closesocket(s)`.
+  5. `TopicManager` cleanly flushes and closes all open `.log` and `.index` file handles, ensuring zero data corruption or uncommitted records.
+
+#### Q9: Why is non-blocking send necessary even after `WSAPoll` says the socket is writable?
+- **Partial Space in OS Buffer**: `WSAPoll` reporting `POLLOUT` only guarantees that the socket's kernel output buffer has *some* space (even as little as 1 byte).
+- **Preventing I/O Stalls**: If the server tries to send a 512 KB `FETCH` response on a blocking socket when only 64 KB of kernel buffer space is available, the thread will block until the client acknowledges packets. Because the I/O thread services all client connections, blocking on a slow receiver would freeze every other connection on the broker.
+- **Non-blocking Strategy**: A non-blocking `send()` writes whatever space is available immediately and returns. If bytes remain, StreamForge buffers them in `out_buffer` and registers `POLLOUT` with `WSAPoll`, allowing the I/O thread to continue servicing other clients while waiting for buffer space to free up.
