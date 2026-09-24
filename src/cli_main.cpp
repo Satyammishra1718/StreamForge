@@ -242,6 +242,84 @@ int main(int argc, char* argv[]) {
             std::cout << "GARBAGE rejected with ERROR code 3 as expected (" << err_msg << ")\n";
             return 0;
 
+        } else if (command == "malformed-produce") {
+            // Hand-crafted PRODUCE body: lying key length (error 10), then PING on same connection.
+            BodyWriter w;
+            w.write_string("orders");
+            w.write_i32(0);
+            w.write_u16(1);
+            w.write_u32(10000);
+            w.write_u8('A');
+
+            std::vector<uint8_t> body = w.take_buffer();
+            Frame req{ HEADER_SIZE + static_cast<uint32_t>(body.size()), MessageType::PRODUCE, req_id++, body };
+            std::vector<uint8_t> data = FrameCodec::encode(req);
+            if (sock.send_all(data.data(), data.size()) != SendResult::Success) {
+                std::cerr << "Failed to send malformed PRODUCE frame\n";
+                return 1;
+            }
+
+            Frame resp;
+            if (!read_response_frame(sock, resp)) return 1;
+            uint16_t code = 0;
+            std::string err_msg;
+            if (!FrameCodec::parse_error_frame(resp, code, err_msg) || code != ErrorCode::MALFORMED_BODY) {
+                std::cerr << "MALFORMED-PRODUCE test failed. Expected error code 10, got code: " << code << "\n";
+                return 1;
+            }
+
+            Frame ping_req;
+            ping_req.type = MessageType::PING;
+            ping_req.request_id = req_id++;
+            ping_req.length = HEADER_SIZE;
+            if (!send_and_receive(sock, ping_req, resp)) return 1;
+            std::cout << "MALFORMED-PRODUCE received ERROR code 10, subsequent PING succeeded\n";
+            return 0;
+
+        } else if (command == "produce-oversized") {
+            if (args.empty()) {
+                std::cerr << "Usage: streamforge_cli produce-oversized TOPIC\n";
+                return 1;
+            }
+            std::string topic_name = args[0];
+            // Encoded on-disk record must exceed 1 MiB; keep the PRODUCE frame at or under 1 MiB.
+            const size_t value_size = 1048549;
+
+            ProduceRequest req_msg;
+            req_msg.topic = topic_name;
+            req_msg.partition = 0;
+            req_msg.record_count = 1;
+            req_msg.records.push_back({ {}, std::vector<uint8_t>(value_size, 'X') });
+
+            BodyWriter writer;
+            req_msg.encode(writer);
+            std::vector<uint8_t> body = writer.take_buffer();
+            if (HEADER_SIZE + body.size() > MAX_FRAME_LENGTH) {
+                std::cerr << "Internal test payload exceeds max frame size\n";
+                return 1;
+            }
+
+            Frame req{ HEADER_SIZE + static_cast<uint32_t>(body.size()), MessageType::PRODUCE, req_id++, body };
+            std::vector<uint8_t> encoded = FrameCodec::encode(req);
+            if (sock.send_all(encoded.data(), encoded.size()) != SendResult::Success) {
+                std::cerr << "Failed to send produce-oversized frame\n";
+                return 1;
+            }
+
+            Frame resp;
+            if (!read_response_frame(sock, resp)) return 1;
+            uint16_t err_code = 0;
+            std::string err_msg;
+            if (resp.type != MessageType::MSG_ERROR ||
+                !FrameCodec::parse_error_frame(resp, err_code, err_msg) ||
+                err_code != ErrorCode::RECORD_TOO_LARGE) {
+                std::cerr << "PRODUCE-OVERSIZED test failed. Expected error code 9, got type=0x"
+                          << static_cast<int>(resp.type) << " code=" << err_code << "\n";
+                return 1;
+            }
+            std::cout << "PRODUCE-OVERSIZED rejected with ERROR code 9 as expected (" << err_msg << ")\n";
+            return 0;
+
         } else if (command == "unknown-type") {
             Frame req;
             req.type = 0x7F;

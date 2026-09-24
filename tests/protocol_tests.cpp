@@ -220,6 +220,35 @@ TEST_CASE(malformed_body_validation_no_crash) {
             FrameCodec::parse_error_frame(resp, code, msg);
             CHECK_EQ(code, ErrorCode::MALFORMED_BODY);
         }
+
+        // e) Trailing garbage in LIST_TOPICS (non-empty body)
+        {
+            BodyWriter w;
+            w.write_u8(0x01);
+            Frame req{ HEADER_SIZE + static_cast<uint32_t>(w.buffer().size()), MessageType::LIST_TOPICS, 5, w.take_buffer() };
+            Frame resp = handler.handle_request(req);
+            CHECK_EQ(resp.type, MessageType::MSG_ERROR);
+            uint16_t code = 0; std::string msg;
+            FrameCodec::parse_error_frame(resp, code, msg);
+            CHECK_EQ(code, ErrorCode::MALFORMED_BODY);
+        }
+
+        // f) Record count mismatch in PRODUCE (declared 2 records, only 1 present)
+        {
+            BodyWriter w;
+            w.write_string("test_topic");
+            w.write_i32(0);
+            w.write_u16(2);
+            w.write_bytes({'k'});
+            w.write_bytes({'v'});
+
+            Frame req{ HEADER_SIZE + static_cast<uint32_t>(w.buffer().size()), MessageType::PRODUCE, 6, w.take_buffer() };
+            Frame resp = handler.handle_request(req);
+            CHECK_EQ(resp.type, MessageType::MSG_ERROR);
+            uint16_t code = 0; std::string msg;
+            FrameCodec::parse_error_frame(resp, code, msg);
+            CHECK_EQ(code, ErrorCode::MALFORMED_BODY);
+        }
     }
     cleanup_temp_dir(dir);
 }

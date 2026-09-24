@@ -63,6 +63,9 @@ try {
     $outBadName = & $cliExe --port $port create-topic CON 1 2>&1
     Report-Check "Invalid topic name 'CON' returns Error Code 6" ($outBadName -match "Error \(code 6\)")
 
+    $outBadPath = & $cliExe --port $port create-topic "../x" 1 2>&1
+    Report-Check "Invalid topic name '../x' returns Error Code 6" ($outBadPath -match "Error \(code 6\)")
+
     # 4. Produce 1,000 records to partition 0; Fetch back in pages (offsets 0..999)
     & $cliExe --port $port produce-many orders 1000 --partition 0 --size 64 --batch 100 | Out-Null
     $outFetchAll = & $cliExe --port $port fetch orders 0 0 --max-messages 1000
@@ -93,9 +96,12 @@ try {
     $outInvPart = & $cliExe --port $port fetch orders 99 0 2>&1
     Report-Check "Invalid partition returns Error Code 7" ($outInvPart -match "Error \(code 7\)")
 
+    $outOverRecord = & $cliExe --port $port produce-oversized orders 2>&1
+    Report-Check "Oversized record returns Error Code 9" ($LASTEXITCODE -eq 0 -and $outOverRecord -match "ERROR code 9")
+
     # 9. Malformed PRODUCE body -> Error 10, connection stays open for follow-up PING
-    $outMalformed = & $cliExe --port $port unknown-type 2>&1
-    Report-Check "Malformed request handling maintains connection for follow-up PING" ($LASTEXITCODE -eq 0 -and $outMalformed -match "subsequent PING succeeded")
+    $outMalformed = & $cliExe --port $port malformed-produce 2>&1
+    Report-Check "Malformed PRODUCE body returns Error Code 10 and connection stays open" ($LASTEXITCODE -eq 0 -and $outMalformed -match "subsequent PING succeeded")
 
     # 10. 8 Parallel Producer Processes (500 records each -> 4,000 records in total into partition 0)
     & $cliExe --port $port create-topic parallel_topic 1 | Out-Null
