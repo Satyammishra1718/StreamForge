@@ -26,10 +26,14 @@ public:
         m_tests.push_back({name, func});
     }
 
+    void set_suite_title(const std::string& title) {
+        m_suite_title = title;
+    }
+
     int run_all() {
         int passed = 0;
         int failed = 0;
-        std::cout << "========== Running StreamForge Storage Unit Tests ==========" << std::endl;
+        std::cout << "========== Running " << m_suite_title << " ==========" << std::endl;
         for (const auto& test : m_tests) {
             std::cout << "[ RUN      ] " << test.name << std::endl;
             m_current_failed = false;
@@ -69,6 +73,7 @@ private:
     std::vector<TestInfo> m_tests;
     bool m_current_failed{false};
     std::string m_current_test_name;
+    std::string m_suite_title{"StreamForge Storage Unit Tests"};
 };
 
 struct RegisterHelper {

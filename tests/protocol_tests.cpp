@@ -172,6 +172,56 @@ TEST_CASE(malformed_body_validation_no_crash) {
             CHECK_EQ(code, ErrorCode::MALFORMED_BODY);
         }
 
+        // a2) Lying string length in CREATE_TOPIC
+        {
+            BodyWriter w;
+            w.write_u16(500);
+            w.write_u8('x');
+            Frame req{ HEADER_SIZE + static_cast<uint32_t>(w.buffer().size()), MessageType::CREATE_TOPIC, 11, w.take_buffer() };
+            Frame resp = handler.handle_request(req);
+            CHECK_EQ(resp.type, MessageType::MSG_ERROR);
+            uint16_t code = 0; std::string msg;
+            FrameCodec::parse_error_frame(resp, code, msg);
+            CHECK_EQ(code, ErrorCode::MALFORMED_BODY);
+        }
+
+        // c2) Truncated FETCH body
+        {
+            BodyWriter w;
+            w.write_string("test_topic");
+            w.write_u16(0);
+            Frame req{ HEADER_SIZE + static_cast<uint32_t>(w.buffer().size()), MessageType::FETCH, 12, w.take_buffer() };
+            Frame resp = handler.handle_request(req);
+            CHECK_EQ(resp.type, MessageType::MSG_ERROR);
+            uint16_t code = 0; std::string msg;
+            FrameCodec::parse_error_frame(resp, code, msg);
+            CHECK_EQ(code, ErrorCode::MALFORMED_BODY);
+        }
+
+        // d2) Truncated DESCRIBE_TOPIC (length prefix only)
+        {
+            BodyWriter w;
+            w.write_u16(10);
+            Frame req{ HEADER_SIZE + static_cast<uint32_t>(w.buffer().size()), MessageType::DESCRIBE_TOPIC, 13, w.take_buffer() };
+            Frame resp = handler.handle_request(req);
+            CHECK_EQ(resp.type, MessageType::MSG_ERROR);
+            uint16_t code = 0; std::string msg;
+            FrameCodec::parse_error_frame(resp, code, msg);
+            CHECK_EQ(code, ErrorCode::MALFORMED_BODY);
+        }
+
+        // e2) Truncated LIST_TOPICS (partial byte)
+        {
+            BodyWriter w;
+            w.write_u8(0x00);
+            Frame req{ HEADER_SIZE + static_cast<uint32_t>(w.buffer().size()), MessageType::LIST_TOPICS, 14, w.take_buffer() };
+            Frame resp = handler.handle_request(req);
+            CHECK_EQ(resp.type, MessageType::MSG_ERROR);
+            uint16_t code = 0; std::string msg;
+            FrameCodec::parse_error_frame(resp, code, msg);
+            CHECK_EQ(code, ErrorCode::MALFORMED_BODY);
+        }
+
         // b) Lying length field in PRODUCE (key length declared as 10000 bytes, buffer ends)
         {
             BodyWriter w;
@@ -308,5 +358,6 @@ TEST_CASE(max_size_boundary_limits) {
 }
 
 int main() {
+    ::streamforge::test::TestRegistry::instance().set_suite_title("StreamForge Protocol Unit Tests");
     return ::streamforge::test::TestRegistry::instance().run_all();
 }
