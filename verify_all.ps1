@@ -11,7 +11,9 @@ $suites = @(
     @{ Name = "Milestone 2 Storage Engine"; Script = ".\test_storage.ps1" },
     @{ Name = "Milestone 3 Broker Network Integration"; Script = ".\test_broker.ps1" },
     @{ Name = "Milestone 4 Concurrency, I/O Loop & Thread Pool"; Script = ".\test_concurrency.ps1" },
-    @{ Name = "Milestone 5 Consumer Groups & Offset Commits"; Script = ".\test_groups.ps1" }
+    @{ Name = "Milestone 5 Consumer Groups & Offset Commits"; Script = ".\test_groups.ps1" },
+    @{ Name = "Milestone 6 Crash Recovery"; Script = ".\test_crash_recovery.ps1" },
+    @{ Name = "Milestone 6 Retention & GC"; Script = ".\test_retention.ps1" }
 )
 
 $passedSuites = 0

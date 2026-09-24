@@ -533,3 +533,109 @@ Here is the exact lifecycle of a `PRODUCE` request through every layer of the ne
     - Storage file handles (`.log`, `.index`) belong to persistent partition objects and are not reopened or duplicated during group operations.
     - Memory for departed group members is erased from `m_members` hash maps, preventing memory leaks across thousands of rebalances.
 
+---
+
+## Milestone 6: Retention, GC & Crash Recovery
+
+### 1. Milestone 6 Plain-Language Walkthrough
+
+In Milestone 6, we evolved StreamForge from an append-only unbounded message store into a resilient, production-ready storage engine that bounds its disk footprint and survives unexpected system crashes or power failures without data corruption:
+
+1. **Log Retention & Garbage Collection**:
+   - As producers append records, partitions automatically roll their append log into immutable segments. Without retention, disk usage grows indefinitely.
+   - We implemented `RetentionManager`, running a background thread on a configurable interval. It evaluates each partition's closed segments against two retention criteria: **time-based** (`retention_ms`) and **size-based** (`retention_bytes`).
+   - Old segments are unlinked in ascending offset order. Crucially, the **active segment is never deleted**, ensuring producers always have a valid target segment to append to.
+   - To make file deletion robust under Windows, all files are opened with Win32 `FILE_SHARE_DELETE`. When `RetentionManager` deletes an old segment file, any active consumer threads holding read handles can finish reading their in-flight buffers without encountering sharing violation errors (`ERROR_SHARING_VIOLATION`). Once handles close, Windows reclaims the storage automatically.
+   - When consumers attempt to read from pruned offsets, the broker returns `ErrorCode::OFFSET_OUT_OF_RANGE` (code 8). Consumer groups automatically query the broker for the current earliest offset via `DESCRIBE_TOPIC`, log a warning, reset their offset, and continue streaming cleanly.
+
+2. **Crash Recovery & Fast Startup Verification**:
+   - In distributed brokers, a power cut or hard kill can occur at any microsecond. StreamForge provides two startup verification modes:
+     - **Full Scan (`verify_and_rebuild_full`)**: Scans every record from offset 0, verifies CRC32 checksums, detects torn writes, truncates uncommitted bytes with `SetEndOfFile`, and reconstructs sparse `.index` and `.sealed` metadata files from scratch.
+     - **Quick Scan (`verify_quick`)**: Designed for multi-gigabyte or multi-terabyte datasets. It checks index alignment and spot-checks the last record CRC using index position lookups, allowing near-instant broker restarts.
+   - We designed the `.sealed` sidecar (`<base_offset>.sealed`). When an active segment rolls, it is sealed with an immutable sidecar containing record count, byte size, last offset, last timestamp, and a header CRC32. On startup, segments with valid `.sealed` markers skip expensive sequential record verification.
+   - To verify recovery under real-world crash scenarios, we integrated compile-time crash injection points (`mid_write_record`, `between_log_and_index`, `between_seal_and_sealed`, `mid_write_offset_commit`) and verified that child process crashes are fully recovered on subsequent broker boot.
+   - During extensive handle-leak testing across 1,000 partition open/close cycles, we discovered that MinGW GCC's `std::shared_mutex` leaks 2 Win32 kernel handles per instance. We engineered `streamforge::SharedMutex` wrapping the native Win32 Slim Reader/Writer (`SRWLOCK`) API—providing user-space synchronization with zero handle allocations and zero leaks.
+
+---
+
+### 2. Milestone 6 Mandatory Interview Questions & Answers
+
+#### Q1: How does StreamForge decide when a segment is eligible for deletion?
+- **Retention Criteria**:
+  - A segment is evaluated for retention only if it is **closed** (immutable historical segment); the active segment is exempt.
+  - **Age-Based Eligibility**: If `retention_ms > 0`, the segment is eligible for deletion if the difference between the current wall-clock time and the segment's maximum record timestamp (`m_last_timestamp_ms`) exceeds `retention_ms`:
+    $$\text{now}() - \text{segment.last\_timestamp\_ms}() > \text{retention\_ms}$$
+    If timestamps are missing, the file's last modified time is used as a fallback.
+  - **Size-Based Eligibility**: If `retention_bytes > 0`, the partition computes its total disk footprint across all segments. If the total exceeds `retention_bytes`, the oldest closed segments (sorted by base offset) are marked for deletion one by one until the partition size falls below the limit or only the active segment remains.
+  - Segments are always deleted in chronological order (lowest base offset first) to ensure the partition maintains a contiguous range of offsets `[earliest_offset, high_watermark)`.
+
+#### Q2: Why does Kafka and StreamForge delete data at segment granularity rather than record granularity?
+- **High-Performance Filesystem Semantics**:
+  - Deleting individual records from the middle of an append-only file requires rewriting the entire file or performing complex in-place compaction, causing massive disk I/O thrashing and write amplification.
+  - By organizing the partition log as a linked series of fixed-size segment files (e.g. 100 MB or 1 GB each), garbage collection reduces to an $O(1)$ filesystem metadata operation (`DeleteFileW`).
+  - No file rewriting or index compaction is needed: the operating system simply unlinks the directory entries for `.log`, `.index`, and `.sealed`.
+
+#### Q3: What happens if an active segment exceeds retention size or age limits?
+- **Active Segment Invariant**:
+  - The active segment is **never deleted**, even if its size exceeds `retention_bytes` or its oldest records exceed `retention_ms`.
+  - **Rationale**: If the active segment were deleted, the partition would have no destination file for incoming produce requests, forcing producers to block or fail.
+  - Instead, the active segment continues accepting writes until it reaches `segment_bytes` (or rolls due to explicit rollover), at which point it is sealed, a new active segment is created, and the newly sealed segment becomes eligible for garbage collection on the next retention pass.
+
+#### Q4: How does Windows handle file deletion when other processes/threads have open handles to the file (`FILE_SHARE_DELETE`)?
+- **Win32 Deletion Semantics**:
+  - On Windows, if a file handle is opened without `FILE_SHARE_DELETE`, any call to `DeleteFileW()` fails immediately with `ERROR_SHARING_VIOLATION` (error 32).
+  - StreamForge opens all log and index handles with `FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE`.
+  - When `RetentionManager` calls `DeleteFileW()` on a segment while a consumer thread holds an open read handle:
+    1. The operating system marks the file as "pending deletion" and hides it from directory enumeration.
+    2. Active readers can continue reading data from their open handle without errors.
+    3. As soon as all readers finish their fetch requests and close their handles, the NTFS driver releases the file's disk allocations.
+
+#### Q5: How does StreamForge recover from a crash where a record was partially written (torn write)?
+- **Torn Write Detection and Truncation**:
+  - When a crash occurs during a record write (e.g. at `mid_write_record`), the tail of the `.log` file may contain incomplete header bytes, partial payloads, or corrupted checksums.
+  - During `verify_and_rebuild_full()`, StreamForge traverses the log from offset 0, reading record framing:
+    1. Reads 4-byte length $L$. If remaining file bytes $< L + 4$, the write was truncated.
+    2. Reads the full payload and recalculates the IEEE 802.3 CRC32 checksum over `[offset ... payload]`. If CRC does not match the header CRC, corruption occurred.
+    3. When a torn or corrupted record is detected, StreamForge immediately halts scanning, records the last known good byte position $P$, and truncates the file using Win32 `SetFilePointerEx()` followed by `SetEndOfFile()`.
+    4. Any uncommitted partial bytes are discarded, and the index is updated to reflect only valid records up to $P$.
+
+#### Q6: What is the role of the `.sealed` marker sidecar in fast startup and crash recovery?
+- **Immutable Segment Certification**:
+  - Scanning gigabytes or terabytes of historical log records on every broker boot to calculate CRCs creates unacceptable startup latency.
+  - When an active segment rolls, StreamForge writes a 44-byte `<base_offset>.sealed` sidecar containing:
+    - Magic identifier (`SFSEAL1\0`)
+    - Total record count
+    - Total physical byte size
+    - Last offset and timestamp
+    - CRC32 checksum of the header
+  - During quick startup (`verify_quick()`), the broker checks for the existence and validity of `.sealed`. If the sidecar exists, matches the actual `.log` file size, and has a valid CRC, the broker certifies the segment as uncorrupted without reading its individual records.
+  - If `.sealed` is missing (e.g. crash between segment roll and sidecar write), StreamForge automatically falls back to full record-by-record verification for that segment and generates a fresh `.sealed` file.
+
+#### Q7: How does StreamForge handle crash recovery when the index file (`.index`) is corrupted or missing?
+- **Log as Single Source of Truth**:
+  - The sparse index (`.index`) is purely an auxiliary acceleration structure mapping logical offsets to physical byte positions in the `.log` file.
+  - If an index file is missing, zero-sized, or not aligned to the 12-byte entry size (`4-byte relative offset + 8-byte file position`), StreamForge discards the index file and initiates a full scan of the authoritative `.log` file.
+  - As records are validated sequentially, `OffsetIndex::append()` records an entry every $N$ bytes (e.g. 4096 bytes) and at the last record.
+  - The newly regenerated index is flushed to disk with `FlushFileBuffers()`, fully restoring fast random seek capabilities.
+
+#### Q8: How does a consumer group behave when its committed offset falls behind the earliest retained offset (`ERR_OFFSET_OUT_OF_RANGE` code 8)?
+- **Auto-Reset Semantics**:
+  - When retention deletes old segments, a consumer that was offline or lagging may request an offset lower than `partition.earliest_offset`.
+  - The broker rejects the fetch request with `ErrorCode::OFFSET_OUT_OF_RANGE` (code 8).
+  - The consumer group client detects error code 8, queries partition metadata via `DESCRIBE_TOPIC`, logs a descriptive warning:
+    ```text
+    [WARN] Resetting group <group_id> partition <P> offset from <cur_pos> to <earliest> due to retention
+    ```
+  - It resets its local tracking and committed offset to `earliest_offset` and immediately continues fetching the oldest available retained messages without terminating or crashing.
+
+#### Q9: How does `SharedMutex` (Win32 `SRWLOCK`) solve the MinGW GCC `std::shared_mutex` handle leak problem during frequent partition open/close cycles?
+- **Root Cause & Win32 User-Space Lock**:
+  - MinGW GCC's implementation of `std::shared_mutex` (in `win32-threads` mode) creates a Win32 Event and Semaphore kernel object per mutex instance. In versions of MinGW GCC, the destructor fails to release these Win32 handles, leaking exactly 2 kernel handles per instance. In scenarios with 1,000 partition open/close cycles, 2,000 handles are permanently leaked, eventually exhausting process handle limits.
+  - StreamForge implements `streamforge::SharedMutex`, which directly wraps the native Windows Slim Reader/Writer (`SRWLOCK`) API (`AcquireSRWLockExclusive`, `ReleaseSRWLockExclusive`, `AcquireSRWLockShared`, `ReleaseSRWLockShared`).
+  - **Key Advantages**:
+    - **Zero Kernel Handles**: An `SRWLOCK` is a single pointer-sized value (8 bytes) allocated entirely in user-space without any underlying Windows kernel objects.
+    - **Zero Leaks**: Initialization is static (`SRWLOCK_INIT`), and no destruction cleanup is required.
+    - **High Performance**: In the uncontended case, acquiring an SRW lock requires only an atomic CAS in user mode without transitioning into the Windows kernel.
+    - **C++ Standard Compatibility**: Implements `lock()`, `unlock()`, `lock_shared()`, and `unlock_shared()`, seamlessly integrating with standard `std::unique_lock` and `std::shared_lock` RAII wrappers.
+
+

@@ -3,6 +3,8 @@
 #include "streamforge/Partition.hpp"
 #include "streamforge/RecordCodec.hpp"
 #include "streamforge/FileHandle.hpp"
+#include "streamforge/RetentionManager.hpp"
+#include <chrono>
 #include <filesystem>
 #include <random>
 #include <thread>
@@ -482,6 +484,351 @@ TEST_CASE(partition_handle_leak_1000_cycles) {
 
     CHECK_TRUE(handles_after <= handles_before + 2);
 
+    cleanup_temp_dir(dir);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// l. Retention by age: write records older than retention_ms, verify gc deletes
+// ─────────────────────────────────────────────────────────────────────────────
+TEST_CASE(retention_by_age) {
+    auto dir = create_temp_dir("retention_age");
+    {
+        StorageConfig config;
+        config.data_dir = dir.string();
+        config.sync_on_append = false;
+        config.segment_max_bytes = 100; // Small so it rolls often
+
+        TopicManager topic_mgr(config);
+        CHECK(topic_mgr.open_and_recover_all().ok());
+
+        // 1 partition, retention_ms = 5000 (5 seconds)
+        auto topic = topic_mgr.create_topic("age_topic", 1, 5000, 0).value();
+        CHECK_TRUE(topic != nullptr);
+
+        int64_t now_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::system_clock::now().time_since_epoch()).count();
+        int64_t old_ts = now_ms - 20000; // 20s ago (older than 5s retention)
+
+        // Write 6 records with old timestamp (payload 30 bytes, record ~60 bytes, rolls every 2 records)
+        for (int i = 0; i < 6; ++i) {
+            std::vector<uint8_t> val(30, 'A');
+            auto res = topic->append_with_timestamp(0, {}, val, old_ts);
+            CHECK(res.ok());
+        }
+
+        // Write 2 records with recent timestamp
+        for (int i = 0; i < 2; ++i) {
+            std::vector<uint8_t> val(30, 'B');
+            auto res = topic->append_with_timestamp(0, {}, val, now_ms);
+            CHECK(res.ok());
+        }
+
+        auto part = topic->get_partition(0);
+        size_t segs_before = part->segment_count();
+        CHECK_TRUE(segs_before >= 3);
+
+        RetentionManager ret_mgr(topic_mgr);
+        size_t deleted = ret_mgr.run_one_pass(false, "age_topic");
+        CHECK_TRUE(deleted >= 2);
+        CHECK_TRUE(part->segment_count() < segs_before);
+        CHECK_TRUE(part->earliest_offset() > 0);
+    }
+    cleanup_temp_dir(dir);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// m. Retention by size: write records exceeding retention_bytes, oldest deleted
+// ─────────────────────────────────────────────────────────────────────────────
+TEST_CASE(retention_by_size) {
+    auto dir = create_temp_dir("retention_size");
+    {
+        StorageConfig config;
+        config.data_dir = dir.string();
+        config.sync_on_append = false;
+        config.segment_max_bytes = 100;
+
+        TopicManager topic_mgr(config);
+        CHECK(topic_mgr.open_and_recover_all().ok());
+
+        // 1 partition, no age retention, retention_bytes = 250
+        auto topic = topic_mgr.create_topic("size_topic", 1, 0, 250).value();
+        CHECK_TRUE(topic != nullptr);
+
+        for (int i = 0; i < 8; ++i) {
+            std::vector<uint8_t> val(30, 'C');
+            auto res = topic->append({}, val);
+            CHECK(res.ok());
+        }
+
+        auto part = topic->get_partition(0);
+        size_t segs_before = part->segment_count();
+        CHECK_TRUE(segs_before >= 3);
+        uint64_t bytes_before = part->total_bytes();
+        CHECK_TRUE(bytes_before > 250);
+
+        RetentionManager ret_mgr(topic_mgr);
+        size_t deleted = ret_mgr.run_one_pass(false, "size_topic");
+        CHECK_TRUE(deleted >= 1);
+        CHECK_TRUE(part->segment_count() < segs_before);
+        CHECK_TRUE(part->earliest_offset() > 0);
+    }
+    cleanup_temp_dir(dir);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// n. Active segment never deleted even if exceeding retention age or size
+// ─────────────────────────────────────────────────────────────────────────────
+TEST_CASE(retention_active_segment_never_deleted) {
+    auto dir = create_temp_dir("retention_active");
+    {
+        StorageConfig config;
+        config.data_dir = dir.string();
+        config.sync_on_append = false;
+        config.segment_max_bytes = 100000;
+
+        TopicManager topic_mgr(config);
+        CHECK(topic_mgr.open_and_recover_all().ok());
+
+        // Highly aggressive retention: retention_ms = 1, retention_bytes = 1
+        auto topic = topic_mgr.create_topic("active_topic", 1, 1, 1).value();
+        CHECK_TRUE(topic != nullptr);
+
+        int64_t old_ts = 1000; // Far in past
+        auto res = topic->append_with_timestamp(0, {}, {'D'}, old_ts);
+        CHECK(res.ok());
+
+        auto part = topic->get_partition(0);
+        CHECK_EQ(part->segment_count(), 1u);
+
+        RetentionManager ret_mgr(topic_mgr);
+        size_t deleted = ret_mgr.run_one_pass(false, "active_topic");
+        CHECK_EQ(deleted, 0u);
+        CHECK_EQ(part->segment_count(), 1u);
+        CHECK_EQ(part->earliest_offset(), 0u);
+
+        // Active segment is still completely functional
+        auto append_res = topic->append({}, {'N', 'E', 'W'});
+        CHECK(append_res.ok());
+        ReadResult rr = part->read(0, 10);
+        CHECK(rr.status.ok());
+        CHECK_EQ(rr.records.size(), 2u);
+    }
+    cleanup_temp_dir(dir);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// o. FETCH below earliest_offset returns error code 8 (ERR_OFFSET_OUT_OF_RANGE)
+// ─────────────────────────────────────────────────────────────────────────────
+TEST_CASE(fetch_below_earliest_offset_error_8) {
+    auto dir = create_temp_dir("retention_fetch_err8");
+    {
+        StorageConfig config;
+        config.data_dir = dir.string();
+        config.sync_on_append = false;
+        config.segment_max_bytes = 100;
+
+        TopicManager topic_mgr(config);
+        CHECK(topic_mgr.open_and_recover_all().ok());
+
+        auto topic = topic_mgr.create_topic("err8_topic", 1, 1, 1).value();
+        CHECK_TRUE(topic != nullptr);
+
+        for (int i = 0; i < 6; ++i) {
+            std::vector<uint8_t> val(30, 'E');
+            topic->append({}, val);
+        }
+
+        auto part = topic->get_partition(0);
+        RetentionManager ret_mgr(topic_mgr);
+        ret_mgr.run_one_pass(false, "err8_topic");
+
+        uint64_t earliest = part->earliest_offset();
+        CHECK_TRUE(earliest > 0);
+
+        ReadResult rr = part->read(0, 10);
+        CHECK_FALSE(rr.status.ok());
+        CHECK_EQ(static_cast<int>(rr.status.code()), static_cast<int>(StatusCode::OffsetOutOfRange));
+
+        // Read at earliest_offset should succeed
+        ReadResult rr_valid = part->read(earliest, 10);
+        CHECK(rr_valid.status.ok());
+        CHECK_FALSE(rr_valid.records.empty());
+        CHECK_EQ(rr_valid.records[0].offset, earliest);
+    }
+    cleanup_temp_dir(dir);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// p. .sealed sidecar is written on roll and CRC matches full scan
+// ─────────────────────────────────────────────────────────────────────────────
+TEST_CASE(sealed_sidecar_and_crc_verification) {
+    auto dir = create_temp_dir("sealed_sidecar");
+    {
+        StorageConfig config;
+        config.data_dir = dir.string();
+        config.sync_on_append = false;
+        config.segment_max_bytes = 100;
+
+        Partition part(0, dir / "part_0", config);
+        CHECK(part.open_and_recover().ok());
+
+        // Append enough records to trigger at least one roll
+        for (int i = 0; i < 5; ++i) {
+            std::vector<uint8_t> val(35, 'S');
+            part.append({}, val);
+        }
+
+        CHECK_TRUE(part.segment_count() >= 2);
+
+        // Base segment 0 should have .sealed sidecar
+        std::filesystem::path sealed_path = dir / "part_0" / "00000000000000000000.sealed";
+        CHECK_TRUE(std::filesystem::exists(sealed_path));
+        CHECK_EQ(std::filesystem::file_size(sealed_path), 32u);
+
+        // Read sealed marker binary contents
+        FileHandle f = FileHandle::open_read_only(sealed_path);
+        CHECK_TRUE(f.is_valid());
+        SealedMarker file_marker;
+        DWORD bytes_read = 0;
+        CHECK_TRUE(f.read_at(0, &file_marker, sizeof(file_marker), &bytes_read));
+        CHECK_EQ(bytes_read, sizeof(file_marker));
+
+        // Check magic SFSL (0x5346534C)
+        CHECK_EQ(file_marker.magic, 0x5346534Cu);
+        CHECK_TRUE(file_marker.record_count > 0);
+
+        // Open LogSegment manually and verify sealed marker
+        LogSegment seg(0, dir / "part_0", 4096);
+        CHECK(seg.open().ok());
+        CHECK(seg.has_sealed_marker());
+        bool valid = false;
+        CHECK(seg.verify_quick(valid).ok());
+        CHECK_TRUE(valid);
+
+        SealedMarker marker;
+        CHECK(seg.read_sealed_marker(marker).ok());
+        CHECK_EQ(marker.magic, file_marker.magic);
+        CHECK_EQ(marker.crc32_of_whole_log, file_marker.crc32_of_whole_log);
+        CHECK_EQ(marker.record_count, file_marker.record_count);
+        CHECK_EQ(marker.record_count, seg.record_count());
+    }
+    cleanup_temp_dir(dir);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// q. Missing .sealed triggers recovery and rebuilds .sealed sidecar
+// ─────────────────────────────────────────────────────────────────────────────
+TEST_CASE(missing_sealed_sidecar_rebuilt_on_recovery) {
+    auto dir = create_temp_dir("missing_sealed");
+    {
+        StorageConfig config;
+        config.data_dir = dir.string();
+        config.sync_on_append = false;
+        config.segment_max_bytes = 100;
+
+        {
+            Partition part(0, dir / "part_0", config);
+            CHECK(part.open_and_recover().ok());
+
+            for (int i = 0; i < 5; ++i) {
+                std::vector<uint8_t> val(35, 'M');
+                part.append({}, val);
+            }
+            CHECK_TRUE(part.segment_count() >= 2);
+        }
+
+        std::filesystem::path sealed_path = dir / "part_0" / "00000000000000000000.sealed";
+        CHECK_TRUE(std::filesystem::exists(sealed_path));
+
+        // Delete .sealed sidecar to simulate crash before marker write or disk loss
+        std::error_code ec;
+        std::filesystem::remove(sealed_path, ec);
+        CHECK_FALSE(std::filesystem::exists(sealed_path));
+
+        // Reopen partition: recovery should detect missing .sealed, do full scan, and rebuild it!
+        {
+            Partition part(0, dir / "part_0", config);
+            CHECK(part.open_and_recover().ok());
+            CHECK_TRUE(part.segment_count() >= 2);
+            CHECK_FALSE(part.is_degraded());
+
+            // Verify .sealed sidecar was recreated
+            CHECK_TRUE(std::filesystem::exists(sealed_path));
+
+            // Verify partition can read from offset 0 seamlessly
+            ReadResult rr = part.read(0, 10);
+            CHECK(rr.status.ok());
+            CHECK_EQ(rr.records.size(), 5u);
+        }
+    }
+    cleanup_temp_dir(dir);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// r. Quick vs full scan difference: corrupt byte in middle of sealed segment
+// ─────────────────────────────────────────────────────────────────────────────
+TEST_CASE(quick_vs_full_scan_middle_corruption) {
+    auto dir = create_temp_dir("quick_vs_full");
+    {
+        StorageConfig config;
+        config.data_dir = dir.string();
+        config.sync_on_append = false;
+        config.segment_max_bytes = 250;
+        config.index_interval_bytes = 64;
+
+        {
+            Partition part(0, dir / "part_0", config);
+            CHECK(part.open_and_recover().ok());
+
+            // Write 5 records with 40-byte value: record total size = 68 bytes
+            // Record 0 (pos 0), Record 1 (pos 68), Record 2 (pos 136).
+            // Record 3 exceeds 200 bytes, so segment rolls to active segment with records 3, 4.
+            for (int i = 0; i < 5; ++i) {
+                std::vector<uint8_t> val(40, 'Q');
+                part.append({}, val);
+            }
+            CHECK_TRUE(part.segment_count() >= 2);
+        }
+
+        std::filesystem::path log_path = dir / "part_0" / "00000000000000000000.log";
+        CHECK_TRUE(std::filesystem::exists(log_path));
+        uint64_t file_sz = std::filesystem::file_size(log_path);
+        CHECK_TRUE(file_sz > 150);
+
+        // Corrupt a byte in the payload of the middle record (Record 1 at pos 68 + 32 = 100)
+        // Record 0 (first) and Record 2 (last) in this sealed segment remain intact.
+        {
+            FileHandle f = FileHandle::open_read_write(log_path, false);
+            CHECK_TRUE(f.is_valid());
+            OVERLAPPED ov{};
+            ov.Offset = 100;
+            char b = 'Z';
+            DWORD written = 0;
+            CHECK_TRUE(WriteFile(f.get(), &b, 1, &written, &ov) != FALSE);
+            CHECK_EQ(written, 1u);
+            f.flush();
+        }
+
+        // Test 1: Quick scan (startup_scan = "quick")
+        // Quick scan only checks index and first/last records; it succeeds!
+        {
+            StorageConfig quick_config = config;
+            quick_config.startup_scan = "quick";
+            Partition quick_part(0, dir / "part_0", quick_config);
+            CHECK(quick_part.open_and_recover().ok());
+            CHECK_FALSE(quick_part.is_degraded());
+        }
+
+        // Test 2: Full scan (startup_scan = "full")
+        // Full scan checks whole log and all records; detects corruption and flags degraded!
+        {
+            StorageConfig full_config = config;
+            full_config.startup_scan = "full";
+            Partition full_part(0, dir / "part_0", full_config);
+            CHECK(full_part.open_and_recover().ok());
+            CHECK_TRUE(full_part.is_degraded());
+        }
+    }
     cleanup_temp_dir(dir);
 }
 

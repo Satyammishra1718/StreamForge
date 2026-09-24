@@ -4,6 +4,7 @@
 #include "streamforge/LogSegment.hpp"
 #include "streamforge/Status.hpp"
 #include "streamforge/StorageConfig.hpp"
+#include "streamforge/SharedMutex.hpp"
 #include <shared_mutex>
 #include <vector>
 #include <memory>
@@ -63,7 +64,7 @@ private:
     LogSegment* active_segment_unlocked();
     Status roll_segment_unlocked();
 
-    mutable std::shared_mutex m_mutex;
+    mutable SharedMutex m_mutex;
     uint32_t m_partition_id;
     std::filesystem::path m_partition_dir;
     StorageConfig m_config;

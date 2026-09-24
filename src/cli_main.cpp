@@ -1244,7 +1244,23 @@ int main(int argc, char* argv[]) {
                                     partition_positions[off_item.partition] = 0;
                                 }
                             } else {
-                                partition_positions[off_item.partition] = 0;
+                                DescribeTopicRequest dt_req{ topic_name };
+                                BodyWriter dtw;
+                                dt_req.encode(dtw);
+                                std::vector<uint8_t> dt_body = dtw.take_buffer();
+                                Frame dt_frame{ HEADER_SIZE + static_cast<uint32_t>(dt_body.size()), MessageType::DESCRIBE_TOPIC, req_id++, dt_body };
+                                Frame dt_resp;
+                                if (send_and_receive(sock, dt_frame, dt_resp)) {
+                                    BodyReader dtr(dt_resp.body);
+                                    DescribeTopicResponse dt_msg;
+                                    if (dt_msg.decode(dtr) && off_item.partition < dt_msg.partition_offsets.size()) {
+                                        partition_positions[off_item.partition] = dt_msg.partition_offsets[off_item.partition].earliest;
+                                    } else {
+                                        partition_positions[off_item.partition] = 0;
+                                    }
+                                } else {
+                                    partition_positions[off_item.partition] = 0;
+                                }
                             }
                         }
                     }
@@ -1380,6 +1396,26 @@ int main(int argc, char* argv[]) {
                         if (code == ErrorCode::ILLEGAL_GENERATION || code == ErrorCode::UNKNOWN_GROUP_OR_MEMBER) {
                             do_join(true);
                             break;
+                        }
+                        if (code == ErrorCode::OFFSET_OUT_OF_RANGE) {
+                            DescribeTopicRequest dt_req{ a.topic };
+                            BodyWriter dtw;
+                            dt_req.encode(dtw);
+                            std::vector<uint8_t> dt_body = dtw.take_buffer();
+                            Frame dt_frame{ HEADER_SIZE + static_cast<uint32_t>(dt_body.size()), MessageType::DESCRIBE_TOPIC, req_id++, dt_body };
+                            Frame dt_resp;
+                            if (send_and_receive(sock, dt_frame, dt_resp)) {
+                                BodyReader dtr(dt_resp.body);
+                                DescribeTopicResponse dt_msg;
+                                if (dt_msg.decode(dtr) && a.partition < dt_msg.partition_offsets.size()) {
+                                    uint64_t earliest = dt_msg.partition_offsets[a.partition].earliest;
+                                    std::cerr << "[WARN] Resetting group " << group_id << " partition " << a.partition
+                                              << " offset from " << cur_pos << " to " << earliest << " due to retention\n";
+                                    partition_positions[a.partition] = earliest;
+                                    uncommitted_offsets[a.partition] = earliest;
+                                    continue;
+                                }
+                            }
                         }
                     }
 

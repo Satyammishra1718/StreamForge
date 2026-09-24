@@ -4,6 +4,7 @@
 #include "streamforge/Topic.hpp"
 #include "streamforge/StorageConfig.hpp"
 #include "streamforge/Status.hpp"
+#include "streamforge/SharedMutex.hpp"
 #include <string>
 #include <unordered_map>
 #include <memory>
@@ -44,7 +45,7 @@ private:
                                uint64_t& out_retention_ms, uint64_t& out_retention_bytes);
 
     StorageConfig m_config;
-    mutable std::shared_mutex m_mutex;
+    mutable SharedMutex m_mutex;
     std::unordered_map<std::string, std::shared_ptr<Topic>> m_topics;
 };
 

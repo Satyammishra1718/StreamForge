@@ -13,7 +13,7 @@ Partition::Partition(uint32_t partition_id, std::filesystem::path partition_dir,
       m_config(std::move(config)) {}
 
 Status Partition::open_and_recover() {
-    std::unique_lock<std::shared_mutex> lock(m_mutex);
+    std::unique_lock<SharedMutex> lock(m_mutex);
     std::filesystem::create_directories(m_partition_dir);
 
     std::vector<uint64_t> base_offsets;
@@ -164,7 +164,7 @@ Result<uint64_t> Partition::append(const std::vector<uint8_t>& key, const std::v
 }
 
 Result<uint64_t> Partition::append_with_timestamp(const std::vector<uint8_t>& key, const std::vector<uint8_t>& value, int64_t timestamp_ms) {
-    std::unique_lock<std::shared_mutex> lock(m_mutex);
+    std::unique_lock<SharedMutex> lock(m_mutex);
 
     uint32_t record_size = 4 + 24 + static_cast<uint32_t>(key.size() + value.size());
     if (record_size > MAX_RECORD_SIZE) {
@@ -205,7 +205,7 @@ Result<uint64_t> Partition::append_batch(const std::vector<std::pair<std::vector
         return Status::InvalidArgument("Cannot append empty batch");
     }
 
-    std::unique_lock<std::shared_mutex> lock(m_mutex);
+    std::unique_lock<SharedMutex> lock(m_mutex);
 
     // Validate size of every record in batch
     for (const auto& item : batch) {
@@ -261,7 +261,7 @@ Result<uint64_t> Partition::append_batch(const std::vector<std::pair<std::vector
 }
 
 ReadResult Partition::read(uint64_t start_offset, size_t max_messages, size_t max_bytes) {
-    std::shared_lock<std::shared_mutex> lock(m_mutex);
+    std::shared_lock<SharedMutex> lock(m_mutex);
     ReadResult res;
 
     if (start_offset == m_next_offset) {
@@ -338,19 +338,19 @@ uint64_t Partition::next_offset() const {
 }
 
 void Partition::flush() {
-    std::shared_lock<std::shared_mutex> lock(m_mutex);
+    std::shared_lock<SharedMutex> lock(m_mutex);
     for (auto& seg : m_segments) {
         seg->flush();
     }
 }
 
 size_t Partition::segment_count() const {
-    std::shared_lock<std::shared_mutex> lock(m_mutex);
+    std::shared_lock<SharedMutex> lock(m_mutex);
     return m_segments.size();
 }
 
 uint64_t Partition::total_bytes() const {
-    std::shared_lock<std::shared_mutex> lock(m_mutex);
+    std::shared_lock<SharedMutex> lock(m_mutex);
     uint64_t total = 0;
     for (const auto& seg : m_segments) {
         total += seg->log_size_bytes();
@@ -362,7 +362,7 @@ Status Partition::scan_and_delete_segments(uint64_t retention_ms,
                                           uint64_t retention_bytes,
                                           bool dry_run,
                                           std::vector<DeletionCandidate>& out_deleted) {
-    std::unique_lock<std::shared_mutex> lock(m_mutex);
+    std::unique_lock<SharedMutex> lock(m_mutex);
 
     // Deletion unit is a SEALED SEGMENT, never a partial segment, and NEVER the active segment.
     // If we have <= 1 segment, active segment is the only segment and cannot be deleted.

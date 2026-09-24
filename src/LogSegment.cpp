@@ -314,41 +314,21 @@ Status LogSegment::verify_quick(bool& out_valid) const {
     }
 
     // 3. Verify LAST record CRC
-    // Locate last record: start from the last index entry
-    uint32_t search_pos = 0;
-    if (!m_index.entries().empty()) {
-        search_pos = m_index.entries().back().file_position;
+    // Use last_offset if known, otherwise lookup the last index entry
+    uint32_t last_rec_pos = 0;
+    if (m_last_offset >= m_base_offset && m_record_count > 0) {
+        last_rec_pos = lookup_file_position(m_last_offset);
+    } else if (!m_index.entries().empty()) {
+        last_rec_pos = m_index.entries().back().file_position;
     }
 
-    Record last_rec;
-    bool found_last = false;
-    uint32_t pos = search_pos;
-    while (pos < m_log_size_bytes) {
-        if (pos + 28 > m_log_size_bytes) {
-            out_valid = false;
-            return Status::OK();
-        }
-        uint8_t header[28];
-        if (!m_log_file.read_at(pos, header, 28)) {
-            out_valid = false;
-            return Status::OK();
-        }
-        uint32_t len = RecordCodec::read_u32(header);
-        if (len < 24 || len > MAX_RECORD_SIZE || pos + 4 + len > m_log_size_bytes) {
-            out_valid = false;
-            return Status::OK();
-        }
-        Status st = read_record_at(pos, last_rec);
+    if (last_rec_pos < m_log_size_bytes) {
+        Record last_rec;
+        Status st = read_record_at(last_rec_pos, last_rec);
         if (!st.ok()) {
             out_valid = false;
             return Status::OK();
         }
-        found_last = true;
-        pos += (4 + len);
-    }
-
-    if (!found_last) {
-        out_valid = false;
     }
 
     return Status::OK();

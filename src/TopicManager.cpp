@@ -33,6 +33,11 @@ bool TopicManager::validate_topic_name(const std::string& name, std::string& out
         return false;
     }
 
+    if (name.front() == '.' || name.back() == '.') {
+        out_error = "Topic name cannot start or end with '.'";
+        return false;
+    }
+
     // Windows reserved device names
     static const char* reserved_names[] = {
         "CON", "PRN", "AUX", "NUL",
@@ -116,7 +121,7 @@ Status TopicManager::load_topic_metadata(const std::filesystem::path& topic_dir,
 }
 
 Status TopicManager::open_and_recover_all() {
-    std::unique_lock<std::shared_mutex> lock(m_mutex);
+    std::unique_lock<SharedMutex> lock(m_mutex);
     m_topics.clear();
 
     std::filesystem::path base_path(m_config.data_dir);
@@ -162,7 +167,7 @@ Status TopicManager::open_and_recover_all() {
 
 Result<std::shared_ptr<Topic>> TopicManager::create_topic(const std::string& name, uint32_t partitions,
                                                           uint64_t retention_ms, uint64_t retention_bytes) {
-    std::unique_lock<std::shared_mutex> lock(m_mutex);
+    std::unique_lock<SharedMutex> lock(m_mutex);
 
     std::string err;
     if (!validate_topic_name(name, err)) {
@@ -210,7 +215,7 @@ Result<std::shared_ptr<Topic>> TopicManager::create_topic(const std::string& nam
 }
 
 std::shared_ptr<Topic> TopicManager::get_topic(const std::string& name) const {
-    std::shared_lock<std::shared_mutex> lock(m_mutex);
+    std::shared_lock<SharedMutex> lock(m_mutex);
     auto it = m_topics.find(name);
     if (it == m_topics.end()) {
         return nullptr;
@@ -219,7 +224,7 @@ std::shared_ptr<Topic> TopicManager::get_topic(const std::string& name) const {
 }
 
 std::vector<std::shared_ptr<Topic>> TopicManager::list_topics() const {
-    std::shared_lock<std::shared_mutex> lock(m_mutex);
+    std::shared_lock<SharedMutex> lock(m_mutex);
     std::vector<std::shared_ptr<Topic>> list;
     list.reserve(m_topics.size());
     for (const auto& pair : m_topics) {
