@@ -185,36 +185,13 @@ TEST_CASE(malformed_body_validation_no_crash) {
             CHECK_EQ(code, ErrorCode::MALFORMED_BODY);
         }
 
-        // c2) Truncated FETCH body
+        // a3) Trailing garbage in CREATE_TOPIC
         {
             BodyWriter w;
-            w.write_string("test_topic");
-            w.write_u16(0);
-            Frame req{ HEADER_SIZE + static_cast<uint32_t>(w.buffer().size()), MessageType::FETCH, 12, w.take_buffer() };
-            Frame resp = handler.handle_request(req);
-            CHECK_EQ(resp.type, MessageType::MSG_ERROR);
-            uint16_t code = 0; std::string msg;
-            FrameCodec::parse_error_frame(resp, code, msg);
-            CHECK_EQ(code, ErrorCode::MALFORMED_BODY);
-        }
-
-        // d2) Truncated DESCRIBE_TOPIC (length prefix only)
-        {
-            BodyWriter w;
-            w.write_u16(10);
-            Frame req{ HEADER_SIZE + static_cast<uint32_t>(w.buffer().size()), MessageType::DESCRIBE_TOPIC, 13, w.take_buffer() };
-            Frame resp = handler.handle_request(req);
-            CHECK_EQ(resp.type, MessageType::MSG_ERROR);
-            uint16_t code = 0; std::string msg;
-            FrameCodec::parse_error_frame(resp, code, msg);
-            CHECK_EQ(code, ErrorCode::MALFORMED_BODY);
-        }
-
-        // e2) Truncated LIST_TOPICS (partial byte)
-        {
-            BodyWriter w;
-            w.write_u8(0x00);
-            Frame req{ HEADER_SIZE + static_cast<uint32_t>(w.buffer().size()), MessageType::LIST_TOPICS, 14, w.take_buffer() };
+            w.write_string("test_topic_new");
+            w.write_u16(1);
+            w.write_u32(0xDEADBEEF); // trailing garbage
+            Frame req{ HEADER_SIZE + static_cast<uint32_t>(w.buffer().size()), MessageType::CREATE_TOPIC, 12, w.take_buffer() };
             Frame resp = handler.handle_request(req);
             CHECK_EQ(resp.type, MessageType::MSG_ERROR);
             uint16_t code = 0; std::string msg;
@@ -232,6 +209,24 @@ TEST_CASE(malformed_body_validation_no_crash) {
             w.write_u8('A');   // only 1 byte present!
 
             Frame req{ HEADER_SIZE + static_cast<uint32_t>(w.buffer().size()), MessageType::PRODUCE, 2, w.take_buffer() };
+            Frame resp = handler.handle_request(req);
+            CHECK_EQ(resp.type, MessageType::MSG_ERROR);
+            uint16_t code = 0; std::string msg;
+            FrameCodec::parse_error_frame(resp, code, msg);
+            CHECK_EQ(code, ErrorCode::MALFORMED_BODY);
+        }
+
+        // b2) Trailing garbage in PRODUCE
+        {
+            BodyWriter w;
+            w.write_string("test_topic");
+            w.write_i32(0);
+            w.write_u16(1); // 1 record
+            w.write_bytes({'k'});
+            w.write_bytes({'v'});
+            w.write_u32(0xBAADF00D); // trailing garbage
+
+            Frame req{ HEADER_SIZE + static_cast<uint32_t>(w.buffer().size()), MessageType::PRODUCE, 21, w.take_buffer() };
             Frame resp = handler.handle_request(req);
             CHECK_EQ(resp.type, MessageType::MSG_ERROR);
             uint16_t code = 0; std::string msg;
@@ -257,6 +252,32 @@ TEST_CASE(malformed_body_validation_no_crash) {
             CHECK_EQ(code, ErrorCode::MALFORMED_BODY);
         }
 
+        // c2) Truncated FETCH body
+        {
+            BodyWriter w;
+            w.write_string("test_topic");
+            w.write_u16(0);
+            Frame req{ HEADER_SIZE + static_cast<uint32_t>(w.buffer().size()), MessageType::FETCH, 31, w.take_buffer() };
+            Frame resp = handler.handle_request(req);
+            CHECK_EQ(resp.type, MessageType::MSG_ERROR);
+            uint16_t code = 0; std::string msg;
+            FrameCodec::parse_error_frame(resp, code, msg);
+            CHECK_EQ(code, ErrorCode::MALFORMED_BODY);
+        }
+
+        // c3) Lying string length in FETCH
+        {
+            BodyWriter w;
+            w.write_u16(500); // lying topic string length
+            w.write_u8('x');
+            Frame req{ HEADER_SIZE + static_cast<uint32_t>(w.buffer().size()), MessageType::FETCH, 32, w.take_buffer() };
+            Frame resp = handler.handle_request(req);
+            CHECK_EQ(resp.type, MessageType::MSG_ERROR);
+            uint16_t code = 0; std::string msg;
+            FrameCodec::parse_error_frame(resp, code, msg);
+            CHECK_EQ(code, ErrorCode::MALFORMED_BODY);
+        }
+
         // d) Trailing garbage in DESCRIBE_TOPIC
         {
             BodyWriter w;
@@ -271,11 +292,60 @@ TEST_CASE(malformed_body_validation_no_crash) {
             CHECK_EQ(code, ErrorCode::MALFORMED_BODY);
         }
 
+        // d2) Truncated DESCRIBE_TOPIC (length prefix only)
+        {
+            BodyWriter w;
+            w.write_u16(10);
+            Frame req{ HEADER_SIZE + static_cast<uint32_t>(w.buffer().size()), MessageType::DESCRIBE_TOPIC, 41, w.take_buffer() };
+            Frame resp = handler.handle_request(req);
+            CHECK_EQ(resp.type, MessageType::MSG_ERROR);
+            uint16_t code = 0; std::string msg;
+            FrameCodec::parse_error_frame(resp, code, msg);
+            CHECK_EQ(code, ErrorCode::MALFORMED_BODY);
+        }
+
+        // d3) Lying string length in DESCRIBE_TOPIC
+        {
+            BodyWriter w;
+            w.write_u16(500); // lying topic string length
+            w.write_u8('z');
+            Frame req{ HEADER_SIZE + static_cast<uint32_t>(w.buffer().size()), MessageType::DESCRIBE_TOPIC, 42, w.take_buffer() };
+            Frame resp = handler.handle_request(req);
+            CHECK_EQ(resp.type, MessageType::MSG_ERROR);
+            uint16_t code = 0; std::string msg;
+            FrameCodec::parse_error_frame(resp, code, msg);
+            CHECK_EQ(code, ErrorCode::MALFORMED_BODY);
+        }
+
         // e) Trailing garbage in LIST_TOPICS (non-empty body)
         {
             BodyWriter w;
             w.write_u8(0x01);
             Frame req{ HEADER_SIZE + static_cast<uint32_t>(w.buffer().size()), MessageType::LIST_TOPICS, 5, w.take_buffer() };
+            Frame resp = handler.handle_request(req);
+            CHECK_EQ(resp.type, MessageType::MSG_ERROR);
+            uint16_t code = 0; std::string msg;
+            FrameCodec::parse_error_frame(resp, code, msg);
+            CHECK_EQ(code, ErrorCode::MALFORMED_BODY);
+        }
+
+        // e2) Truncated / unexpected payload in LIST_TOPICS
+        {
+            BodyWriter w;
+            w.write_u8(0x00);
+            Frame req{ HEADER_SIZE + static_cast<uint32_t>(w.buffer().size()), MessageType::LIST_TOPICS, 51, w.take_buffer() };
+            Frame resp = handler.handle_request(req);
+            CHECK_EQ(resp.type, MessageType::MSG_ERROR);
+            uint16_t code = 0; std::string msg;
+            FrameCodec::parse_error_frame(resp, code, msg);
+            CHECK_EQ(code, ErrorCode::MALFORMED_BODY);
+        }
+
+        // e3) Lying length prefix in LIST_TOPICS (e.g. 2 bytes specifying a length but zero or partial payload)
+        {
+            BodyWriter w;
+            w.write_u16(500);
+            Frame req{ HEADER_SIZE + static_cast<uint32_t>(w.buffer().size()), MessageType::LIST_TOPICS, 52, w.take_buffer() };
             Frame resp = handler.handle_request(req);
             CHECK_EQ(resp.type, MessageType::MSG_ERROR);
             uint16_t code = 0; std::string msg;
