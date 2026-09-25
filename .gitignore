@@ -11,3 +11,8 @@ build-crash-testing/
 temp_*/
 *.log
 data/
+
+# Generated reports and benchmark output
+*.pdf
+*.html
+benchmark_results/
