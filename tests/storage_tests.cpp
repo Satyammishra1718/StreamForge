@@ -833,8 +833,100 @@ TEST_CASE(quick_vs_full_scan_middle_corruption) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// s. Empty partition read and initial boundaries
+// ─────────────────────────────────────────────────────────────────────────────
+TEST_CASE(empty_partition_read_and_boundaries) {
+    auto dir = create_temp_dir("empty_part");
+    {
+        StorageConfig config;
+        config.data_dir = dir.string();
+        config.sync_on_append = false;
+
+        Partition part(0, dir / "part_0", config);
+        CHECK(part.open_and_recover().ok());
+        CHECK_EQ(part.next_offset(), 0u);
+        CHECK_EQ(part.earliest_offset(), 0u);
+
+        // Read at offset 0 on empty partition returns empty list, status OK
+        ReadResult rr0 = part.read(0, 10);
+        CHECK(rr0.status.ok());
+        CHECK_EQ(rr0.records.size(), 0u);
+
+        // Read at offset 1 returns OffsetOutOfRange
+        ReadResult rr1 = part.read(1, 10);
+        CHECK_EQ(static_cast<int>(rr1.status.code()), static_cast<int>(StatusCode::OffsetOutOfRange));
+
+        // Append 1 record
+        std::vector<uint8_t> val = {'f', 'i', 'r', 's', 't'};
+        auto append_res = part.append({}, val);
+        CHECK(append_res.ok());
+        CHECK_EQ(append_res.value(), 0u);
+        CHECK_EQ(part.next_offset(), 1u);
+
+        // Now read at 0 returns 1 record
+        ReadResult rr_after = part.read(0, 10);
+        CHECK(rr_after.status.ok());
+        CHECK_EQ(rr_after.records.size(), 1u);
+        CHECK_EQ(rr_after.records[0].offset, 0u);
+    }
+    cleanup_temp_dir(dir);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// t. Missing .index rebuilt from .log on recovery
+// ─────────────────────────────────────────────────────────────────────────────
+TEST_CASE(missing_index_rebuilt_from_log_on_recovery) {
+    auto dir = create_temp_dir("rebuild_index");
+    {
+        StorageConfig config;
+        config.data_dir = dir.string();
+        config.sync_on_append = false;
+        config.index_interval_bytes = 64; // Low interval to force multiple index entries
+
+        {
+            Partition part(0, dir / "part_0", config);
+            CHECK(part.open_and_recover().ok());
+
+            for (size_t i = 0; i < 20; ++i) {
+                std::string val = "index_test_payload_" + std::to_string(i);
+                part.append({}, std::vector<uint8_t>(val.begin(), val.end()));
+            }
+            CHECK_EQ(part.next_offset(), 20u);
+        }
+
+        std::filesystem::path index_path = dir / "part_0" / "00000000000000000000.index";
+        CHECK_TRUE(std::filesystem::exists(index_path));
+
+        // Delete .index file to simulate filesystem corruption or missing index
+        std::error_code ec;
+        std::filesystem::remove(index_path, ec);
+        CHECK_FALSE(std::filesystem::exists(index_path));
+
+        // Reopen partition: recovery should detect missing .index and rebuild it from .log
+        {
+            Partition part(0, dir / "part_0", config);
+            CHECK(part.open_and_recover().ok());
+            CHECK_EQ(part.next_offset(), 20u);
+            CHECK_FALSE(part.is_degraded());
+
+            // Check that .index was recreated on disk
+            CHECK_TRUE(std::filesystem::exists(index_path));
+
+            // Verify random access reads work correctly using rebuilt index
+            ReadResult rr = part.read(15, 5);
+            CHECK(rr.status.ok());
+            CHECK_EQ(rr.records.size(), 5u);
+            CHECK_EQ(rr.records[0].offset, 15u);
+            CHECK_EQ(rr.records[4].offset, 19u);
+        }
+    }
+    cleanup_temp_dir(dir);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Entry point
 // ─────────────────────────────────────────────────────────────────────────────
 int main() {
     return ::streamforge::test::TestRegistry::instance().run_all();
 }
+

@@ -774,7 +774,61 @@ TEST_CASE(max_size_boundary_limits) {
     cleanup_temp_dir(dir);
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// 4. Zero-byte key and zero-byte value records
+// ─────────────────────────────────────────────────────────────────────────────
+TEST_CASE(zero_byte_key_and_value_records) {
+    // Case 1: Empty key, non-empty value
+    Record r1;
+    r1.offset = 100;
+    r1.timestamp_ms = 123456789;
+    r1.key = {};
+    r1.value = {'h', 'e', 'l', 'l', 'o'};
+
+    std::vector<uint8_t> enc1 = RecordCodec::encode(r1);
+    Record dec1;
+    Status s1 = RecordCodec::decode(enc1.data(), enc1.size(), dec1);
+    CHECK(s1.ok());
+    CHECK_EQ(dec1.offset, 100u);
+    CHECK_EQ(dec1.timestamp_ms, 123456789);
+    CHECK_TRUE(dec1.key.empty());
+    CHECK_EQ(dec1.value.size(), 5u);
+
+    // Case 2: Non-empty key, empty value
+    Record r2;
+    r2.offset = 101;
+    r2.timestamp_ms = 123456790;
+    r2.key = {'k', 'e', 'y'};
+    r2.value = {};
+
+    std::vector<uint8_t> enc2 = RecordCodec::encode(r2);
+    Record dec2;
+    Status s2 = RecordCodec::decode(enc2.data(), enc2.size(), dec2);
+    CHECK(s2.ok());
+    CHECK_EQ(dec2.offset, 101u);
+    CHECK_EQ(dec2.timestamp_ms, 123456790);
+    CHECK_EQ(dec2.key.size(), 3u);
+    CHECK_TRUE(dec2.value.empty());
+
+    // Case 3: Both key and value empty
+    Record r3;
+    r3.offset = 102;
+    r3.timestamp_ms = 123456791;
+    r3.key = {};
+    r3.value = {};
+
+    std::vector<uint8_t> enc3 = RecordCodec::encode(r3);
+    Record dec3;
+    Status s3 = RecordCodec::decode(enc3.data(), enc3.size(), dec3);
+    CHECK(s3.ok());
+    CHECK_EQ(dec3.offset, 102u);
+    CHECK_EQ(dec3.timestamp_ms, 123456791);
+    CHECK_TRUE(dec3.key.empty());
+    CHECK_TRUE(dec3.value.empty());
+}
+
 int main() {
     ::streamforge::test::TestRegistry::instance().set_suite_title("StreamForge Protocol Unit Tests");
     return ::streamforge::test::TestRegistry::instance().run_all();
 }
+
