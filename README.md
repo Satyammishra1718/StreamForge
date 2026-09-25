@@ -1,151 +1,131 @@
 # StreamForge
 
-**A Kafka-Inspired, High-Performance Durable Message Broker in C++17 Running NATIVELY on Windows.**
+**A Kafka-Inspired, High-Performance Durable Message Broker — built from scratch in C++17, running natively on Windows.**
 
 [![C++17](https://img.shields.io/badge/Language-C%2B%2B17-blue.svg)](https://en.wikipedia.org/wiki/C%2B%2B17)
 [![Platform](https://img.shields.io/badge/Platform-Windows%2010%20%2F%2011-0078D6.svg)](https://microsoft.com/windows)
-[![Networking](https://img.shields.io/badge/Network-Winsock2%20WSAPoll-brightgreen.svg)]()
+[![Network](https://img.shields.io/badge/Network-Winsock2%20WSAPoll-brightgreen.svg)]()
 [![Storage](https://img.shields.io/badge/Storage-Append--Only%20Log%20%2B%20Sparse%20Index-orange.svg)]()
 [![Zero Dependencies](https://img.shields.io/badge/Dependencies-Zero%20External-success.svg)]()
-
-StreamForge is an open-source, durable, partitioned message broker built from scratch in modern C++17 to bring the architectural beauty of Apache Kafka to native Microsoft Windows environments. It eliminates POSIX shims, WSL, Docker, and third-party dependencies in favor of native Win32 APIs, Winsock2, and standard library primitives.
-
----
-
-## Key Highlights
-
-- **Native Windows Mechanical Sympathy:** Built directly on Win32 file handles (`CreateFileW`), memory-mapped files (`CreateFileMappingW` / `MapViewOfFile`), NTFS file pre-allocation (`SetFilePointerEx` + `SetEndOfFile`) to eliminate disk fragmentation, and Slim Reader/Writer Locks (`SRWLOCK`).
-- **High-Throughput Asynchronous Reactor:** Single I/O thread driving `WSAPoll` multiplexing with an inter-thread TCP loopback `WakeupChannel`, decoupled from a fixed-worker `ThreadPool`.
-- **Dynamic TCP Backpressure:** `TaskQueue` watermark tracking automatically throttles client socket reads and sets zero-window receive buffers (`SO_RCVBUF = 0`) when worker queues saturate.
-- **Partitioned Append-Only Storage:** Commit logs structured with fixed-stride 16-byte sparse indices, achieving $O(\log N)$ binary search memory-mapped lookups.
-- **Consumer Group Coordination & Sticky Assignor:** Kafka-compatible group rebalancing protocol (`JoinGroup`, `SyncGroup`, `Heartbeat`, `LeaveGroup`) with a cooperative sticky partition assignor and persistent `__consumer_offsets`.
-- **Crash Recovery & Retention GC:** Automatic tail-corruption truncation on crash restarts, missing index rebuilding, clean shutdown metadata markers, and background segment retention cleanup (`retention.ms` / `retention.bytes`).
+[![Tests](https://img.shields.io/badge/Tests-7%2F7%20Suites%20Passing-brightgreen.svg)]()
 
 ---
 
-## Architecture Overview
+> Built this to deeply understand how Apache Kafka works under the hood — partitioned logs, binary protocols, async I/O, consumer groups, crash recovery — everything from scratch, no external libraries.
 
-```mermaid
-flowchart TD
-    subgraph Clients["Clients"]
-        P[Producers]
-        C[Consumers]
-    end
+---
 
-    subgraph Network["1. Network Layer (Winsock2 Reactor)"]
-        EL[Single I/O Reactor EventLoop<br/>WSAPoll Multiplexer]
-        WQ[Loopback WakeupChannel]
-        TQ[Bounded TaskQueue<br/>High/Low Watermark Backpressure]
-    end
+## What is StreamForge?
 
-    subgraph Compute["2. Worker Pool & Protocol"]
-        TP[Worker ThreadPool<br/>4..16 Worker Threads]
-        PROTO[Binary Wire Codec & Frame Assembler<br/>CRC32 Validation]
-    end
+StreamForge is a fully functional message broker inspired by Apache Kafka. It is written entirely in **modern C++17** using only native Windows APIs (Winsock2, Win32) — no POSIX shims, no WSL, no Docker, no third-party libraries.
 
-    subgraph Storage["3. Storage Engine"]
-        TM[TopicManager]
-        TOP[Topic]
-        PART[Partition: SharedMutex RW-Lock]
-        ACT[Active Segment<br/>Append .log + Sparse .index]
-        SEAL[Sealed Segments<br/>Memory-Mapped .index]
-        RM[RetentionManager Background GC]
-    end
+It supports:
+- Creating **topics** with multiple **partitions**
+- **Producing** messages from multiple concurrent clients
+- **Consuming** via offset-based **fetch** or a **consumer group** (with rebalancing)
+- Durable on-disk **append-only log storage** with sparse memory-mapped indices
+- **Crash recovery** — detects torn writes on restart, truncates corruption, rebuilds indices
+- **Retention GC** — background cleanup of old log segments by time or size
+- **Backpressure** — TCP zero-window throttling when the broker is overloaded
 
-    subgraph Coordination["4. Coordination & Offsets"]
-        GC[GroupCoordinator<br/>Rebalance State Machine]
-        SA[StickyAssignor<br/>Cooperative Rebalance]
-        OFF[OffsetStore Cache<br/>__consumer_offsets Compacted Topic]
-    end
+---
 
-    P & C <-->|Winsock TCP Sockets| EL
-    EL <--> TQ
-    TQ <--> TP
-    TP <--> PROTO
-    TP <--> TM
-    TM --> TOP --> PART --> ACT & SEAL
-    PART <--> RM
-    TP <--> GC
-    GC --> SA
-    GC --> OFF
-    OFF --> TM
-    TP -.->|Wakeup Signal| WQ -.->|Interrupt Poll| EL
+## Real Benchmark Numbers
+
+> Measured on: Intel i5-13420H, 12 cores, 15.6 GB RAM, NVMe SSD — Windows 11
+
+| Scenario | Result |
+|---|---|
+| Peak produce throughput | **77,306 records/sec** (7.37 MB/s) at 4 connections |
+| Peak fetch throughput | **65,044 records/sec** (6.20 MB/s) large batch |
+| 1,000 concurrent connections | **17 threads flat**, p99 latency **3.86 ms** |
+| Crash recovery (100K records) | **735 ms** quick scan, **1,580 ms** full CRC scan |
+| Thread-per-conn (old) vs WSAPoll (new) | 203 threads vs **17 threads** at 200 connections |
+
+---
+
+## Architecture
+
+```
+Producers / Consumers
+        │
+        │  TCP (Winsock2)
+        ▼
+┌─────────────────────────────────────────────┐
+│          Single I/O Reactor Thread           │
+│          WSAPoll Multiplexer                 │
+│          WakeupChannel (loopback TCP)        │
+│          Bounded TaskQueue + Backpressure    │
+└──────────────┬──────────────────────────────┘
+               │
+               ▼
+┌─────────────────────────────────────────────┐
+│         Worker Thread Pool (4–16)           │
+│         Binary Frame Codec + CRC32          │
+│         Message Handler / Router            │
+└──────┬──────────────────────┬───────────────┘
+       │                      │
+       ▼                      ▼
+┌─────────────┐    ┌──────────────────────────┐
+│ TopicManager│    │    GroupCoordinator       │
+│ Topic       │    │    Consumer Group FSM     │
+│ Partition   │    │    StickyAssignor         │
+│ LogSegment  │    │    OffsetStore            │
+│ OffsetIndex │    │    __consumer_offsets     │
+│ RetentionGC │    └──────────────────────────┘
+└─────────────┘
+       │
+  .log + .index files (on disk)
 ```
 
----
-
-## Performance Snapshot
-
-*Measured natively on Windows 11 (13th Gen Intel Core i5-13420H, 12 logical cores, NVMe SSD):*
-
-- **Peak Produce Throughput:** **87,037 records/sec** (8.30 MB/sec at 100-byte payloads across 8 connections).
-- **Sub-Millisecond Median Latency:** **p50 = 0.81 ms** under high batching.
-- **Connection Scalability:** Holds **1,000 concurrent connections** flat at **17 server threads** with **p99 latency < 4.0 ms**.
-- **Instantaneous Recovery:** Sub-10 ms crash-recovery startup scan on pre-indexed multi-segment partitions.
-
-For complete reproducible benchmarks and configuration details, see [docs/BENCHMARKS.md](file:///C:/Users/satya/OneDrive/Desktop/StreamForge/docs/BENCHMARKS.md).
+Full architecture diagrams with Mermaid flowcharts and sequence diagrams are in [`docs/HLD.md`](docs/HLD.md).
 
 ---
 
-## Quickstart Guide
+## Quickstart
 
 ### Prerequisites
-- **Operating System:** Windows 10 or Windows 11 (64-bit)
-- **Compiler:** MinGW GCC/G++ 11+ (MSYS2 UCRT64 recommended) or Visual Studio MSVC 2019+
-- **Build System:** CMake 3.16+
+- Windows 10 or 11 (64-bit)
+- MinGW GCC 11+ via [MSYS2 UCRT64](https://www.msys2.org/) **or** Visual Studio 2019+
+- CMake 3.16+
 
-### 1. Build StreamForge
-Run the build script in PowerShell:
+### Build
+
 ```powershell
 .\build.ps1
 ```
-*Builds all binaries (`streamforge_server.exe`, `streamforge_cli.exe`, `streamforge_storage.exe`, `streamforge_bench.exe`, and unit test binaries) with zero compiler warnings (`-Wall -Wextra -Wpedantic`).*
 
-### 2. Start the Message Broker
+Builds everything with **zero warnings** (`-Wall -Wextra -Wpedantic`).
+
+### Run the Broker
+
 ```powershell
-# Start broker on port 9092 with 4 worker threads
 .\build\streamforge_server.exe --port 9092 --data-dir .\data --workers 4
 ```
 
-### 3. Produce and Consume Records (CLI)
-Open a separate PowerShell terminal:
+### Use the CLI (in a second terminal)
+
 ```powershell
 # Create a topic with 4 partitions
-.\build\streamforge_cli.exe --port 9092 create-topic my-topic 4
+.\build\streamforge_cli.exe --port 9092 create-topic orders 4
 
-# Produce messages
-.\build\streamforge_cli.exe --port 9092 produce my-topic "Hello StreamForge!" --key "k1"
-.\build\streamforge_cli.exe --port 9092 produce my-topic "Second Message" --key "k2"
+# Produce a message
+.\build\streamforge_cli.exe --port 9092 produce orders "Hello StreamForge" --key k1
 
-# Fetch messages from partition 0 starting at offset 0
-.\build\streamforge_cli.exe --port 9092 fetch my-topic 0 0 --max 10
+# Read it back
+.\build\streamforge_cli.exe --port 9092 fetch orders 0 0
 
-# Consume via a coordinated Consumer Group
-.\build\streamforge_cli.exe --port 9092 group-join my-group my-topic
+# Join a consumer group
+.\build\streamforge_cli.exe --port 9092 group-join my-group orders
 ```
 
-### 4. Run Verification & Test Suite
+### Run All Tests
+
 ```powershell
-# Run the master test verification suite (7 test suites, 100% pass)
 powershell -ExecutionPolicy Bypass -File .\verify_all.ps1
 ```
 
-### 5. Run the Automated Benchmark Suite
-```powershell
-powershell -ExecutionPolicy Bypass -File .\scripts\run_benchmarks.ps1
-```
-
----
-
-## Technical Documentation Index
-
-Detailed architectural and systems documentation is available in the [`docs/`](file:///C:/Users/satya/OneDrive/Desktop/StreamForge/docs/) directory:
-
-- [**High-Level Design (HLD)**](file:///C:/Users/satya/OneDrive/Desktop/StreamForge/docs/HLD.md): 4-layer architecture diagrams, produce/fetch sequence flows, and core design tradeoffs.
-- [**Low-Level Design (LLD)**](file:///C:/Users/satya/OneDrive/Desktop/StreamForge/docs/LLD.md): Concrete C++ class diagrams, design patterns, exact on-disk binary layouts, and complete lock inventory table.
-- [**Benchmark Suite & Performance Report**](file:///C:/Users/satya/OneDrive/Desktop/StreamForge/docs/BENCHMARKS.md): Full real-world benchmark measurements across 7 scenarios (throughput, latency percentiles, connection scaling, recovery speed, old vs new networking).
-- [**Test Coverage Matrix**](file:///C:/Users/satya/OneDrive/Desktop/StreamForge/docs/TEST_COVERAGE.md): 53-point test matrix mapping every architectural requirement across M1–M6 to unit and integration tests.
-- [**Technical Interview Preparation Guide**](file:///C:/Users/satya/OneDrive/Desktop/StreamForge/docs/INTERVIEW_PREP.md): 25+ comprehensive interview Q&As covering systems programming, Windows OS internals, storage mechanics, concurrency, and deep dives on the 5 primary system design prompts.
+**7/7 suites pass, 0 warnings, 0 leaks.**
 
 ---
 
@@ -153,46 +133,56 @@ Detailed architectural and systems documentation is available in the [`docs/`](f
 
 ```
 StreamForge/
-├── include/streamforge/     # Public header files
-│   ├── Assignor.hpp         # Cooperative sticky partition assignor
-│   ├── ConnectionState.hpp  # Per-connection socket buffers & assembler
-│   ├── FileHandle.hpp       # RAII Win32 file handle & memory map wrappers
-│   ├── FrameCodec.hpp       # Binary wire frame encoding & decoding
-│   ├── GroupCoordinator.hpp # Consumer group state machine & rebalance
-│   ├── LogSegment.hpp       # Single append-only .log segment
-│   ├── MessageHandler.hpp   # Request router & protocol dispatcher
-│   ├── OffsetIndex.hpp      # 16-byte fixed-stride memory-mapped sparse index
-│   ├── OffsetStore.hpp      # In-memory cache backed by __consumer_offsets
-│   ├── Partition.hpp        # Multi-segment partition with SharedMutex
-│   ├── RetentionManager.hpp # Background time & size segment cleaner
-│   ├── Socket.hpp           # RAII Winsock2 socket wrapper
-│   ├── TaskQueue.hpp        # Bounded queue with watermark backpressure
-│   ├── TcpServer.hpp        # Asynchronous WSAPoll reactor server
-│   ├── ThreadPool.hpp       # Worker thread pool
-│   ├── Topic.hpp            # Topic containing 1..N Partitions
-│   ├── TopicManager.hpp     # Topic discovery, recovery & lifecycle
-│   └── WakeupChannel.hpp    # Non-blocking loopback notification channel
-├── src/                     # Implementation files
-├── tests/                   # Storage, protocol, network, and group test suites
-├── scripts/                 # Benchmark runners and verification scripts
-├── docs/                    # Architectural HLD, LLD, benchmarks, and interview notes
-└── CMakeLists.txt           # Top-level CMake configuration
+├── include/streamforge/    # All header files
+├── src/                    # All implementation files
+├── tests/                  # Unit + integration test suites
+├── scripts/                # Benchmark runner, PDF generator
+├── docs/                   # HLD, LLD, Benchmarks, Interview Prep
+├── build.ps1               # One-command build script
+├── verify_all.ps1          # Master test verification
+└── CMakeLists.txt
 ```
 
 ---
 
-## Architectural Decisions & Tradeoffs
+## Documentation
 
-| Choice | Implemented Approach | Alternative Evaluated | Why? |
-|---|---|---|---|
-| **Networking** | Single I/O Reactor (`WSAPoll`) + Thread Pool | Thread-per-Connection | Thread-per-connection allocates 1 MB stacks per thread and collapses at hundreds of connections. Reactor scales to 1,000+ idle connections at constant memory. |
-| **Storage Engine** | Append-Only `.log` + 16B Sparse `.index` | SQLite / RocksDB | Append-only files eliminate LSM compaction write-amplification and B-Tree rebalancing, maximizing sequential disk write speeds. |
-| **Indexing** | Sparse (every 4 KB) + `MapViewOfFile` | Dense In-Memory Hash Map | Keeps index size under 0.4% of log size, allowing binary search to run directly across memory-mapped virtual address space. |
-| **Assignor** | Cooperative Sticky Assignor | Static Range Assignor | Eliminates stop-the-world partition revocation storms during consumer rebalances by keeping 80%+ of existing partition assignments intact. |
-| **Backpressure** | Watermark-based `SO_RCVBUF = 0` | Dropping incoming packets | Gracefully pauses producer TCP transmission windows rather than dropping records or running out of broker RAM. |
+| Document | What's Inside |
+|---|---|
+| [`docs/HLD.md`](docs/HLD.md) | 4-layer architecture, produce/fetch data flows, design tradeoffs |
+| [`docs/LLD.md`](docs/LLD.md) | C++ class diagrams, on-disk binary formats, full lock inventory |
+| [`docs/BENCHMARKS.md`](docs/BENCHMARKS.md) | All 7 benchmark scenarios with real numbers |
+| [`docs/TEST_COVERAGE.md`](docs/TEST_COVERAGE.md) | 53-point requirement traceability matrix |
+| [`docs/INTERVIEW_PREP.md`](docs/INTERVIEW_PREP.md) | 25+ systems interview Q&As |
+
+---
+
+## Key Design Decisions
+
+| Decision | What I chose | Why not the alternative |
+|---|---|---|
+| Networking | `WSAPoll` reactor + thread pool | Thread-per-connection wastes 1 MB stack per client, collapses at scale |
+| Storage | Append-only `.log` + sparse `.index` | No LSM compaction overhead like RocksDB, pure sequential writes |
+| Index lookup | Memory-mapped binary search | Zero-copy, O(log N), index stays < 0.4% of log size |
+| Consumer assignment | Cooperative Sticky Assignor | Range/round-robin cause full partition reshuffles on every rebalance |
+| Backpressure | `SO_RCVBUF = 0` (TCP zero-window) | Drops no data, client pauses naturally at the transport layer |
+
+---
+
+## Milestones Built
+
+| # | What was built |
+|---|---|
+| M1 | Winsock2 TCP server + binary wire protocol + PING/ECHO |
+| M2 | Partitioned append-only log engine + sparse memory-mapped index |
+| M3 | PRODUCE / FETCH over TCP + CLI client |
+| M4 | WSAPoll I/O reactor + bounded worker thread pool + backpressure |
+| M5 | Consumer groups, partition assignment, heartbeats, offset commits |
+| M6 | Retention GC + crash recovery + CRC32 tail truncation |
+| M7 | Test coverage audit + benchmark suite + HLD/LLD documentation |
 
 ---
 
 ## License
 
-StreamForge is released under the MIT License.
+MIT

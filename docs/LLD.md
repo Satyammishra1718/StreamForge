@@ -158,27 +158,27 @@ classDiagram
 StreamForge applies established systems software engineering patterns to achieve high throughput, strict RAII lifecycle management, and clear isolation of responsibilities:
 
 ### A. Reactor Pattern
-- **Component:** `TcpServer` ([`include/streamforge/TcpServer.hpp`](file:///C:/Users/satya/OneDrive/Desktop/StreamForge/include/streamforge/TcpServer.hpp), [`src/TcpServer.cpp`](file:///C:/Users/satya/OneDrive/Desktop/StreamForge/src/TcpServer.cpp))
+- **Component:** `TcpServer` ([`include/streamforge/TcpServer.hpp`](include/streamforge/TcpServer.hpp), [`src/TcpServer.cpp`](src/TcpServer.cpp))
 - **Role:** Implements an asynchronous event demultiplexer using native Win32 `WSAPoll()`. The single I/O thread monitors listening and connected sockets for `POLLRDNORM` and `POLLWRNORM`. Network events are translated to frame-assembly actions without blocking.
 
 ### B. Half-Sync / Half-Async Concurrency Pattern
-- **Component:** `TcpServer` (Async layer) $\leftrightarrow$ `TaskQueue` $\leftrightarrow$ `ThreadPool` (Sync layer) ([`include/streamforge/ThreadPool.hpp`](file:///C:/Users/satya/OneDrive/Desktop/StreamForge/include/streamforge/ThreadPool.hpp), [`src/ThreadPool.cpp`](file:///C:/Users/satya/OneDrive/Desktop/StreamForge/src/ThreadPool.cpp))
+- **Component:** `TcpServer` (Async layer) $\leftrightarrow$ `TaskQueue` $\leftrightarrow$ `ThreadPool` (Sync layer) ([`include/streamforge/ThreadPool.hpp`](include/streamforge/ThreadPool.hpp), [`src/ThreadPool.cpp`](src/ThreadPool.cpp))
 - **Role:** Decouples fast socket I/O from slow synchronous operations (disk writes, fsync, and complex protocol decoding). Sockets remain responsive while worker threads absorb storage latency.
 
 ### C. Bounded Producer-Consumer Pattern with Watermark Backpressure
-- **Component:** `TaskQueue` ([`include/streamforge/TaskQueue.hpp`](file:///C:/Users/satya/OneDrive/Desktop/StreamForge/include/streamforge/TaskQueue.hpp))
+- **Component:** `TaskQueue` ([`include/streamforge/TaskQueue.hpp`](include/streamforge/TaskQueue.hpp))
 - **Role:** Bounded thread-safe queue with high-watermark (e.g. 500 tasks) and low-watermark (e.g. 200 tasks). When the queue reaches the high watermark, the I/O reactor suspends reads and sets `SO_RCVBUF = 0`, applying TCP zero-window backpressure to clients.
 
 ### D. Resource Acquisition Is Initialization (RAII)
-- **Component:** `Socket` ([`include/streamforge/Socket.hpp`](file:///C:/Users/satya/OneDrive/Desktop/StreamForge/include/streamforge/Socket.hpp)), `FileHandle` ([`include/streamforge/FileHandle.hpp`](file:///C:/Users/satya/OneDrive/Desktop/StreamForge/include/streamforge/FileHandle.hpp))
+- **Component:** `Socket` ([`include/streamforge/Socket.hpp`](include/streamforge/Socket.hpp)), `FileHandle` ([`include/streamforge/FileHandle.hpp`](include/streamforge/FileHandle.hpp))
 - **Role:** Encapsulates raw OS handles (`SOCKET`, Win32 `HANDLE`, `MapViewOfFile` pointers). Destructors guarantee immediate resource cleanup (`closesocket`, `CloseHandle`, `UnmapViewOfFile`) under normal execution or exception handling.
 
 ### E. Strategy Pattern
-- **Component:** `PartitionAssignor` & `StickyAssignor` ([`include/streamforge/Assignor.hpp`](file:///C:/Users/satya/OneDrive/Desktop/StreamForge/include/streamforge/Assignor.hpp), [`src/Assignor.cpp`](file:///C:/Users/satya/OneDrive/Desktop/StreamForge/src/Assignor.cpp))
+- **Component:** `PartitionAssignor` & `StickyAssignor` ([`include/streamforge/Assignor.hpp`](include/streamforge/Assignor.hpp), [`src/Assignor.cpp`](src/Assignor.cpp))
 - **Role:** Abstract partition assignment algorithm. `StickyAssignor` minimizes partition movements across rebalances while ensuring balanced partition ownership across consumers.
 
 ### F. State Pattern
-- **Component:** `ConsumerGroup` ([`include/streamforge/GroupCoordinator.hpp`](file:///C:/Users/satya/OneDrive/Desktop/StreamForge/include/streamforge/GroupCoordinator.hpp))
+- **Component:** `ConsumerGroup` ([`include/streamforge/GroupCoordinator.hpp`](include/streamforge/GroupCoordinator.hpp))
 - **Role:** Manages the group lifecycle state machine (`Empty`, `PreparingRebalance`, `CompletingRebalance`, `Stable`, `Dead`). Protocol requests are validated against the current state before triggering transitions.
 
 ---

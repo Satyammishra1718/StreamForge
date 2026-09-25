@@ -35,7 +35,7 @@ stateDiagram-v2
 
 ## 3. Partition Assignment Strategies
 
-StreamForge includes two deterministic assignors in [`Assignor.hpp`](file:///c:/Users/satya/OneDrive/Desktop/StreamForge/include/streamforge/Assignor.hpp):
+StreamForge includes two deterministic assignors in [`Assignor.hpp`](include/streamforge/Assignor.hpp):
 
 ### 3.1 Range Assignor (`strategy = 0`)
 - Partitions for each topic are sorted numerically: `0, 1, ..., N-1`.
