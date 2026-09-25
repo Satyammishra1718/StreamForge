@@ -1,0 +1,455 @@
+=====================================================================
+ StreamForge Master Performance Benchmark Suite
+ Timestamp: 20260925_193030
+=====================================================================
+=====================================================================
+ StreamForge Performance Benchmark Runner
+---------------------------------------------------------------------
+ CPU Model:     13th Gen Intel(R) Core(TM) i5-13420H
+ Logical Cores: 12
+ Total Memory:  15.60 GiB
+ Storage Media: SSD (Non-rotational / NVMe)
+=====================================================================
+
+
+>>> SCENARIO A: Produce Throughput (Sync vs Async Fsync Tradeoff)...
+=====================================================================
+ StreamForge Performance Benchmark Runner
+---------------------------------------------------------------------
+ CPU Model:     13th Gen Intel(R) Core(TM) i5-13420H
+ Logical Cores: 12
+ Total Memory:  15.60 GiB
+ Storage Media: SSD (Non-rotational / NVMe)
+=====================================================================
+
+Starting Produce Benchmark [Produce (sync_on_append=true)]:
+  Connections: 1 | Partitions: 1 | Record Size: 100 B | Batch Size: 50 | Duration: 5s (warmup 2s)...
+
+---------------------------------------------------------------------
+ RESULTS: Produce (sync_on_append=true)
+---------------------------------------------------------------------
+ Total Records:      127550
+ Measurement Time:   5.01 s
+ Throughput:         25440 records/sec
+ Data Rate:          2.43 MB/sec
+ Latency Percentiles (ms):
+   p50:   1.880 ms
+   p95:   2.904 ms
+   p99:   3.875 ms
+   p99.9: 7.803 ms
+   Max:   11.223 ms
+   Min:   1.069 ms
+   Avg:   1.963 ms
+---------------------------------------------------------------------
+
+=====================================================================
+ StreamForge Performance Benchmark Runner
+---------------------------------------------------------------------
+ CPU Model:     13th Gen Intel(R) Core(TM) i5-13420H
+ Logical Cores: 12
+ Total Memory:  15.60 GiB
+ Storage Media: SSD (Non-rotational / NVMe)
+=====================================================================
+
+Starting Produce Benchmark [Produce (sync_on_append=false)]:
+  Connections: 1 | Partitions: 1 | Record Size: 100 B | Batch Size: 50 | Duration: 5s (warmup 2s)...
+
+---------------------------------------------------------------------
+ RESULTS: Produce (sync_on_append=false)
+---------------------------------------------------------------------
+ Total Records:      132400
+ Measurement Time:   5.01 s
+ Throughput:         26433 records/sec
+ Data Rate:          2.52 MB/sec
+ Latency Percentiles (ms):
+   p50:   1.835 ms
+   p95:   2.768 ms
+   p99:   3.695 ms
+   p99.9: 4.699 ms
+   Max:   7.519 ms
+   Min:   1.033 ms
+   Avg:   1.889 ms
+---------------------------------------------------------------------
+
+
+>>> SCENARIO B: Produce Scaling (Multi-Connection Load against 16 Partitions)...
+  Running with 1 concurrent producer connections...
+=====================================================================
+ StreamForge Performance Benchmark Runner
+---------------------------------------------------------------------
+ CPU Model:     13th Gen Intel(R) Core(TM) i5-13420H
+ Logical Cores: 12
+ Total Memory:  15.60 GiB
+ Storage Media: SSD (Non-rotational / NVMe)
+=====================================================================
+
+Starting Produce Benchmark [Scaling (N=1)]:
+  Connections: 1 | Partitions: 16 | Record Size: 100 B | Batch Size: 50 | Duration: 5s (warmup 2s)...
+
+---------------------------------------------------------------------
+ RESULTS: Scaling (N=1)
+---------------------------------------------------------------------
+ Total Records:      82250
+ Measurement Time:   5.02 s
+ Throughput:         16388 records/sec
+ Data Rate:          1.56 MB/sec
+ Latency Percentiles (ms):
+   p50:   2.176 ms
+   p95:   3.722 ms
+   p99:   25.389 ms
+   p99.9: 36.940 ms
+   Max:   113.151 ms
+   Min:   1.109 ms
+   Avg:   3.047 ms
+---------------------------------------------------------------------
+
+  Running with 2 concurrent producer connections...
+=====================================================================
+ StreamForge Performance Benchmark Runner
+---------------------------------------------------------------------
+ CPU Model:     13th Gen Intel(R) Core(TM) i5-13420H
+ Logical Cores: 12
+ Total Memory:  15.60 GiB
+ Storage Media: SSD (Non-rotational / NVMe)
+=====================================================================
+
+Starting Produce Benchmark [Scaling (N=2)]:
+  Connections: 2 | Partitions: 16 | Record Size: 100 B | Batch Size: 50 | Duration: 5s (warmup 2s)...
+
+---------------------------------------------------------------------
+ RESULTS: Scaling (N=2)
+---------------------------------------------------------------------
+ Total Records:      9500
+ Measurement Time:   5.04 s
+ Throughput:         1886 records/sec
+ Data Rate:          0.18 MB/sec
+ Latency Percentiles (ms):
+   p50:   50.403 ms
+   p95:   74.437 ms
+   p99:   76.087 ms
+   p99.9: 77.011 ms
+   Max:   89.745 ms
+   Min:   17.283 ms
+   Avg:   53.260 ms
+---------------------------------------------------------------------
+
+  Running with 4 concurrent producer connections...
+=====================================================================
+ StreamForge Performance Benchmark Runner
+---------------------------------------------------------------------
+ CPU Model:     13th Gen Intel(R) Core(TM) i5-13420H
+ Logical Cores: 12
+ Total Memory:  15.60 GiB
+ Storage Media: SSD (Non-rotational / NVMe)
+=====================================================================
+
+Starting Produce Benchmark [Scaling (N=4)]:
+  Connections: 4 | Partitions: 16 | Record Size: 100 B | Batch Size: 50 | Duration: 5s (warmup 2s)...
+
+---------------------------------------------------------------------
+ RESULTS: Scaling (N=4)
+---------------------------------------------------------------------
+ Total Records:      387900
+ Measurement Time:   5.02 s
+ Throughput:         77306 records/sec
+ Data Rate:          7.37 MB/sec
+ Latency Percentiles (ms):
+   p50:   2.450 ms
+   p95:   3.323 ms
+   p99:   4.484 ms
+   p99.9: 19.385 ms
+   Max:   28.697 ms
+   Min:   1.191 ms
+   Avg:   2.585 ms
+---------------------------------------------------------------------
+
+  Running with 8 concurrent producer connections...
+=====================================================================
+ StreamForge Performance Benchmark Runner
+---------------------------------------------------------------------
+ CPU Model:     13th Gen Intel(R) Core(TM) i5-13420H
+ Logical Cores: 12
+ Total Memory:  15.60 GiB
+ Storage Media: SSD (Non-rotational / NVMe)
+=====================================================================
+
+Starting Produce Benchmark [Scaling (N=8)]:
+  Connections: 8 | Partitions: 16 | Record Size: 100 B | Batch Size: 50 | Duration: 5s (warmup 2s)...
+
+---------------------------------------------------------------------
+ RESULTS: Scaling (N=8)
+---------------------------------------------------------------------
+ Total Records:      19300
+ Measurement Time:   5.07 s
+ Throughput:         3805 records/sec
+ Data Rate:          0.36 MB/sec
+ Latency Percentiles (ms):
+   p50:   107.556 ms
+   p95:   134.001 ms
+   p99:   140.595 ms
+   p99.9: 150.419 ms
+   Max:   152.025 ms
+   Min:   26.155 ms
+   Avg:   105.409 ms
+---------------------------------------------------------------------
+
+  Running with 16 concurrent producer connections...
+=====================================================================
+ StreamForge Performance Benchmark Runner
+---------------------------------------------------------------------
+ CPU Model:     13th Gen Intel(R) Core(TM) i5-13420H
+ Logical Cores: 12
+ Total Memory:  15.60 GiB
+ Storage Media: SSD (Non-rotational / NVMe)
+=====================================================================
+
+Starting Produce Benchmark [Scaling (N=16)]:
+  Connections: 16 | Partitions: 16 | Record Size: 100 B | Batch Size: 50 | Duration: 5s (warmup 2s)...
+
+---------------------------------------------------------------------
+ RESULTS: Scaling (N=16)
+---------------------------------------------------------------------
+ Total Records:      363300
+ Measurement Time:   5.11 s
+ Throughput:         71161 records/sec
+ Data Rate:          6.79 MB/sec
+ Latency Percentiles (ms):
+   p50:   4.376 ms
+   p95:   20.608 ms
+   p99:   262.459 ms
+   p99.9: 263.732 ms
+   Max:   263.975 ms
+   Min:   2.625 ms
+   Avg:   11.427 ms
+---------------------------------------------------------------------
+
+
+>>> SCENARIO C: Fetch Throughput (Batching Effect)...
+  Pre-populating topic with 50,000 records...
+  Testing Small Batch Fetch (4 KiB max_bytes, 20 messages)...
+=====================================================================
+ StreamForge Performance Benchmark Runner
+---------------------------------------------------------------------
+ CPU Model:     13th Gen Intel(R) Core(TM) i5-13420H
+ Logical Cores: 12
+ Total Memory:  15.60 GiB
+ Storage Media: SSD (Non-rotational / NVMe)
+=====================================================================
+
+Starting Fetch Benchmark [Fetch Small Batch (4 KiB)]:
+  Topic: bench_fetch P0 | Max Bytes: 4096 | Max Messages: 20 | Duration: 5s (warmup 2s)...
+
+---------------------------------------------------------------------
+ RESULTS: Fetch Small Batch (4 KiB)
+---------------------------------------------------------------------
+ Total Records:      134840
+ Measurement Time:   5.01 s
+ Throughput:         26934 records/sec
+ Data Rate:          2.57 MB/sec
+ Latency Percentiles (ms):
+   p50:   0.683 ms
+   p95:   1.252 ms
+   p99:   1.626 ms
+   p99.9: 2.281 ms
+   Max:   3.411 ms
+   Min:   0.196 ms
+   Avg:   0.722 ms
+---------------------------------------------------------------------
+
+  Testing Large Batch Fetch (1 MiB max_bytes, 500 messages)...
+=====================================================================
+ StreamForge Performance Benchmark Runner
+---------------------------------------------------------------------
+ CPU Model:     13th Gen Intel(R) Core(TM) i5-13420H
+ Logical Cores: 12
+ Total Memory:  15.60 GiB
+ Storage Media: SSD (Non-rotational / NVMe)
+=====================================================================
+
+Starting Fetch Benchmark [Fetch Large Batch (1 MiB)]:
+  Topic: bench_fetch P0 | Max Bytes: 1048500 | Max Messages: 500 | Duration: 5s (warmup 2s)...
+
+---------------------------------------------------------------------
+ RESULTS: Fetch Large Batch (1 MiB)
+---------------------------------------------------------------------
+ Total Records:      325500
+ Measurement Time:   5.00 s
+ Throughput:         65044 records/sec
+ Data Rate:          6.20 MB/sec
+ Latency Percentiles (ms):
+   p50:   7.458 ms
+   p95:   10.541 ms
+   p99:   12.396 ms
+   p99.9: 16.186 ms
+   Max:   21.267 ms
+   Min:   3.576 ms
+   Avg:   7.392 ms
+---------------------------------------------------------------------
+
+
+>>> SCENARIO D: Mixed Workload (4 Producers + 4 Consumers + End-to-End Latency)...
+=====================================================================
+ StreamForge Performance Benchmark Runner
+---------------------------------------------------------------------
+ CPU Model:     13th Gen Intel(R) Core(TM) i5-13420H
+ Logical Cores: 12
+ Total Memory:  15.60 GiB
+ Storage Media: SSD (Non-rotational / NVMe)
+=====================================================================
+
+Starting Mixed Workload Benchmark:
+  Producers: 4 | Consumers: 4 | Group: bench_cg | Topic: bench_mixed | Duration: 6s (warmup 2s)...
+
+---------------------------------------------------------------------
+ RESULTS: Mixed Workload (Producers + Consumers)
+---------------------------------------------------------------------
+ Producer Rate:      1665 records/sec (10490 total)
+ Consumer Rate:      3333 records/sec (21000 total)
+ End-to-End Latency (Produce -> Receive):
+   p50:   16.000 ms
+   p95:   77.000 ms
+   p99:   95.000 ms
+   p99.9: 307.000 ms
+   Max:   323.000 ms
+   Min:   2.000 ms
+   Avg:   21.791 ms
+---------------------------------------------------------------------
+
+
+>>> SCENARIO E: Connection Scaling (M4 Event Loop Thread Count & Ping Latency)...
+  Testing with 10 concurrent idle connections...
+=====================================================================
+ StreamForge Performance Benchmark Runner
+---------------------------------------------------------------------
+ CPU Model:     13th Gen Intel(R) Core(TM) i5-13420H
+ Logical Cores: 12
+ Total Memory:  15.60 GiB
+ Storage Media: SSD (Non-rotational / NVMe)
+=====================================================================
+
+Running Connection Scaling Benchmark: 10 connections...
+---------------------------------------------------------------------
+ RESULTS: Connection Scaling (N = 10)
+---------------------------------------------------------------------
+ Connected Sockets:   10
+ Server Thread Count: 17
+ PING Latency Percentiles (ms):
+   p50:   0.287 ms
+   p95:   0.467 ms
+   p99:   0.540 ms
+   Max:   0.761 ms
+   Avg:   0.289 ms
+---------------------------------------------------------------------
+
+  Testing with 100 concurrent idle connections...
+=====================================================================
+ StreamForge Performance Benchmark Runner
+---------------------------------------------------------------------
+ CPU Model:     13th Gen Intel(R) Core(TM) i5-13420H
+ Logical Cores: 12
+ Total Memory:  15.60 GiB
+ Storage Media: SSD (Non-rotational / NVMe)
+=====================================================================
+
+Running Connection Scaling Benchmark: 100 connections...
+---------------------------------------------------------------------
+ RESULTS: Connection Scaling (N = 100)
+---------------------------------------------------------------------
+ Connected Sockets:   100
+ Server Thread Count: 17
+ PING Latency Percentiles (ms):
+   p50:   0.229 ms
+   p95:   0.480 ms
+   p99:   0.622 ms
+   Max:   1.062 ms
+   Avg:   0.252 ms
+---------------------------------------------------------------------
+
+  Testing with 500 concurrent idle connections...
+=====================================================================
+ StreamForge Performance Benchmark Runner
+---------------------------------------------------------------------
+ CPU Model:     13th Gen Intel(R) Core(TM) i5-13420H
+ Logical Cores: 12
+ Total Memory:  15.60 GiB
+ Storage Media: SSD (Non-rotational / NVMe)
+=====================================================================
+
+Running Connection Scaling Benchmark: 500 connections...
+---------------------------------------------------------------------
+ RESULTS: Connection Scaling (N = 500)
+---------------------------------------------------------------------
+ Connected Sockets:   500
+ Server Thread Count: 17
+ PING Latency Percentiles (ms):
+   p50:   0.601 ms
+   p95:   1.365 ms
+   p99:   1.609 ms
+   Max:   9.327 ms
+   Avg:   0.724 ms
+---------------------------------------------------------------------
+
+  Testing with 1000 concurrent idle connections...
+=====================================================================
+ StreamForge Performance Benchmark Runner
+---------------------------------------------------------------------
+ CPU Model:     13th Gen Intel(R) Core(TM) i5-13420H
+ Logical Cores: 12
+ Total Memory:  15.60 GiB
+ Storage Media: SSD (Non-rotational / NVMe)
+=====================================================================
+
+Running Connection Scaling Benchmark: 1000 connections...
+---------------------------------------------------------------------
+ RESULTS: Connection Scaling (N = 1000)
+---------------------------------------------------------------------
+ Connected Sockets:   1000
+ Server Thread Count: 17
+ PING Latency Percentiles (ms):
+   p50:   1.877 ms
+   p95:   3.265 ms
+   p99:   3.866 ms
+   Max:   12.950 ms
+   Avg:   2.103 ms
+---------------------------------------------------------------------
+
+
+>>> SCENARIO F: Broker Restart Recovery Time (Quick vs Full Startup Scan)...
+  Populating dataset: 1K records (1000 records)...
+  Populating dataset: 50K records (50000 records)...
+  Populating dataset: 100K records (100000 records)...
+
+---------------------------------------------------------------------
+ RECOVERY TIME SUMMARY TABLE
+---------------------------------------------------------------------
+
+DatasetRecords QuickScanMs FullScanMs Speedup
+-------------- ----------- ---------- -------
+1K                      53        549   10.36
+50K                    612       1060    1.73
+100K                   735       1580    2.15
+
+
+
+
+>>> SCENARIO G: Old vs New Networking Architecture (M3 vs M4+)...
+  Comparing M3 Thread-Per-Connection vs M4 WSAPoll Event-Loop at 10, 50, 100, 200 connections...
+
+---------------------------------------------------------------------
+ OLD VS NEW NETWORKING COMPARISON TABLE
+---------------------------------------------------------------------
+
+Connections M3_Threads M4_Threads M3_p99_ms M4_p99_ms
+----------- ---------- ---------- --------- ---------
+         10         13         17 0.355     0.533    
+         50         53         17 0.287     0.490    
+        100        103         17 0.282     0.499    
+        200        203         17 0.241     0.656    
+
+
+
+
+=====================================================================
+ BENCHMARK SUITE COMPLETE
+ Raw logs saved in: C:\Users\satya\OneDrive\Desktop\StreamForge\benchmark_results\20260925_193030
+=====================================================================

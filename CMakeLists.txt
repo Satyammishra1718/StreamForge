@@ -61,6 +61,10 @@ target_link_libraries(streamforge_cli PRIVATE streamforge_core)
 add_executable(streamforge_storage src/storage_main.cpp)
 target_link_libraries(streamforge_storage PRIVATE streamforge_core)
 
+# Benchmark Tool executable
+add_executable(streamforge_bench src/bench_main.cpp)
+target_link_libraries(streamforge_bench PRIVATE streamforge_core)
+
 # Storage Unit Tests executable
 add_executable(streamforge_storage_tests tests/storage_tests.cpp)
 target_link_libraries(streamforge_storage_tests PRIVATE streamforge_core)
